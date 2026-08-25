@@ -1,0 +1,6 @@
+windows-agent/build/
+windows-agent/out/
+tools/received/
+mac-app/venv/
+mac-app/__pycache__/
+mac-app/*.pt
