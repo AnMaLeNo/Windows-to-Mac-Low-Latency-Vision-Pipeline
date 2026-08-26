@@ -21,12 +21,33 @@ def main():
     last_seq = None
 
     while True:
+        # Block until at least one datagram is available, then drain any backlog that
+        # piled up in the kernel socket buffer while we were busy decoding/inferring the
+        # previous frame - keep only the newest one. Without this, a plain recvfrom() loop
+        # processes every frame in arrival order: if inference is slower than the arrival
+        # rate, nothing is ever lost, but everything falls further and further behind, so
+        # the debug window visibly lags more the longer motion continues. Dropping stale
+        # frames trades "see every frame" for "always see the most recent one", which is
+        # what a latency-critical detector wants.
         data, _addr = sock.recvfrom(65535)
+        dropped = 0
+        sock.setblocking(False)
+        while True:
+            try:
+                data, _addr = sock.recvfrom(65535)
+                dropped += 1
+            except BlockingIOError:
+                break
+        sock.setblocking(True)
+
         recv_t0 = time.perf_counter()
 
         seq, capture_ts_us, capture_to_send_us, width, height, jpeg_size = unpack_header(data)
         if last_seq is not None and seq != last_seq + 1:
-            print(f"[gap] expected {last_seq + 1}, got {seq} ({seq - last_seq - 1} dropped/reordered)")
+            missing = seq - last_seq - 1
+            lost_in_transit = missing - dropped
+            print(f"[gap] {missing} missing (seq {last_seq + 1}..{seq - 1}): "
+                  f"{dropped} dropped here for staleness, {lost_in_transit} lost in transit")
         last_seq = seq
 
         jpeg_bytes = data[HEADER_SIZE:HEADER_SIZE + jpeg_size]
