@@ -1,10 +1,12 @@
-#include "capture.h"
+﻿#include "capture.h"
 #include "encoder.h"
 #include "network.h"
 #include "protocol.h"
 
 #include <windows.h>
 #include <winsock2.h>
+
+#include <DirectXPackedVector.h>
 
 #include <chrono>
 #include <csignal>
@@ -58,8 +60,8 @@ int RunDumpMode(DesktopCapture& capture, int frameCount) {
             continue;  // timeout, cursor-only update, or ACCESS_LOST recovery - just retry
         }
 
-        size_t jpegSize = EncodeBgraToJpeg(mappedData, rowPitch, kRoiWidth, kRoiHeight, kJpegQuality,
-                                            jpegBuf.data(), jpegBuf.size());
+        size_t jpegSize = EncodeFrameToJpeg(mappedData, rowPitch, capture.Format(), kRoiWidth, kRoiHeight,
+                                             kJpegQuality, jpegBuf.data(), jpegBuf.size());
         capture.UnmapFrame();
 
         if (jpegSize == 0) {
@@ -91,6 +93,25 @@ int RunBenchMode(DesktopCapture& capture) {
         if (g_stopRequested) return 0;
     }
 
+    // Dump a few raw source pixels alongside their encoded result. Cheap insurance that
+    // the format branch, row pitch and channel order are all being read as intended -
+    // a silently wrong conversion looks like a plausible image, not a crash.
+    std::cout << "\nSample pixels (raw source -> encoded RGB):\n";
+    for (int i = 0; i < 4; ++i) {
+        const int x = (kRoiWidth / 5) * (i + 1);
+        const int y = kRoiHeight / 2;
+        if (capture.Format() == DXGI_FORMAT_R16G16B16A16_FLOAT) {
+            const auto* px = reinterpret_cast<const uint16_t*>(mappedData + static_cast<size_t>(y) * rowPitch) + x * 4;
+            std::printf("  (%3d,%3d) half bits R=%04X G=%04X B=%04X -> linear %.3f %.3f %.3f\n", x, y, px[0],
+                        px[1], px[2], DirectX::PackedVector::XMConvertHalfToFloat(px[0]),
+                        DirectX::PackedVector::XMConvertHalfToFloat(px[1]),
+                        DirectX::PackedVector::XMConvertHalfToFloat(px[2]));
+        } else {
+            const uint8_t* px = mappedData + static_cast<size_t>(y) * rowPitch + x * 4;
+            std::printf("  (%3d,%3d) BGRA %3d %3d %3d %3d\n", x, y, px[0], px[1], px[2], px[3]);
+        }
+    }
+
     std::vector<uint8_t> buf(kMaxJpegSize);
     const size_t rawSize = static_cast<size_t>(kRoiWidth) * kRoiHeight * 3;
     std::cout << "\nRaw RGB " << kRoiWidth << "x" << kRoiHeight << " = " << rawSize
@@ -104,7 +125,8 @@ int RunBenchMode(DesktopCapture& capture) {
         double bestMs = 1e9;
         for (int i = 0; i < 5; ++i) {
             const auto t0 = std::chrono::steady_clock::now();
-            size = EncodeBgraToJpeg(mappedData, rowPitch, kRoiWidth, kRoiHeight, q, buf.data(), buf.size());
+            size = EncodeFrameToJpeg(mappedData, rowPitch, capture.Format(), kRoiWidth, kRoiHeight, q,
+                                      buf.data(), buf.size());
             const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
             if (ms < bestMs) bestMs = ms;
         }
@@ -146,8 +168,8 @@ int RunNetworkedLoop(DesktopCapture& capture) {
                                              std::chrono::system_clock::now().time_since_epoch())
                                              .count();
 
-        size_t jpegSize = EncodeBgraToJpeg(mappedData, rowPitch, kRoiWidth, kRoiHeight, kJpegQuality, jpegDst,
-                                            kMaxJpegSize);
+        size_t jpegSize = EncodeFrameToJpeg(mappedData, rowPitch, capture.Format(), kRoiWidth, kRoiHeight,
+                                             kJpegQuality, jpegDst, kMaxJpegSize);
         capture.UnmapFrame();
 
         if (jpegSize == 0) {
@@ -185,6 +207,7 @@ int main(int argc, char** argv) {
     try {
         std::cout << "ROI=(" << kRoiX << "," << kRoiY << ") " << kRoiWidth << "x" << kRoiHeight << "\n";
         DesktopCapture capture(kRoiX, kRoiY, kRoiWidth, kRoiHeight);
+        InitHdrEncoding(capture.SdrWhiteScale());
 
         if (mode == "--bench") {
             return RunBenchMode(capture);
@@ -200,3 +223,4 @@ int main(int argc, char** argv) {
         return 1;
     }
 }
+

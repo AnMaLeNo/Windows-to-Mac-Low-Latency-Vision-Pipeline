@@ -4,6 +4,7 @@
 #include <iostream>
 #include <sstream>
 #include <stdexcept>
+#include <vector>
 
 using Microsoft::WRL::ComPtr;
 
@@ -19,6 +20,44 @@ void ThrowIfFailed(HRESULT hr, const char* what) {
     if (FAILED(hr)) {
         throw std::runtime_error(std::string(what) + " failed, hr=" + HrToString(hr));
     }
+}
+
+// With HDR on, Windows composites SDR content into the scRGB buffer scaled up to the
+// user's "SDR content brightness" setting rather than to scRGB 1.0 (= 80 nits). Without
+// dividing that back out, ordinary white lands well above 1.0 and everything clips to a
+// blown-out highlight. Returns the scale as a multiple of scRGB 1.0, or 1.0 if it can't
+// be determined (also the correct value when HDR is off).
+float QuerySdrWhiteScale(const WCHAR* gdiDeviceName) {
+    UINT32 pathCount = 0, modeCount = 0;
+    if (GetDisplayConfigBufferSizes(QDC_ONLY_ACTIVE_PATHS, &pathCount, &modeCount) != ERROR_SUCCESS) {
+        return 1.0f;
+    }
+    std::vector<DISPLAYCONFIG_PATH_INFO> paths(pathCount);
+    std::vector<DISPLAYCONFIG_MODE_INFO> modes(modeCount);
+    if (QueryDisplayConfig(QDC_ONLY_ACTIVE_PATHS, &pathCount, paths.data(), &modeCount, modes.data(),
+                           nullptr) != ERROR_SUCCESS) {
+        return 1.0f;
+    }
+
+    for (UINT32 i = 0; i < pathCount; ++i) {
+        DISPLAYCONFIG_SOURCE_DEVICE_NAME source = {};
+        source.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME;
+        source.header.size = sizeof(source);
+        source.header.adapterId = paths[i].sourceInfo.adapterId;
+        source.header.id = paths[i].sourceInfo.id;
+        if (DisplayConfigGetDeviceInfo(&source.header) != ERROR_SUCCESS) continue;
+        if (wcscmp(source.viewGdiDeviceName, gdiDeviceName) != 0) continue;
+
+        DISPLAYCONFIG_SDR_WHITE_LEVEL white = {};
+        white.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_SDR_WHITE_LEVEL;
+        white.header.size = sizeof(white);
+        white.header.adapterId = paths[i].targetInfo.adapterId;
+        white.header.id = paths[i].targetInfo.id;
+        if (DisplayConfigGetDeviceInfo(&white.header) != ERROR_SUCCESS) return 1.0f;
+        // SDRWhiteLevel is in thousandths of the scRGB 1.0 reference.
+        return white.SDRWhiteLevel > 0 ? white.SDRWhiteLevel / 1000.0f : 1.0f;
+    }
+    return 1.0f;
 }
 
 }  // namespace
@@ -98,18 +137,70 @@ DesktopCapture::DesktopCapture(int roiX, int roiY, int roiWidth, int roiHeight)
 
     ThrowIfFailed(foundOutput.As(&m_output1), "QueryInterface IDXGIOutput1");
 
+    // HDR being on wrecks the captured image, so say so loudly rather than letting it look
+    // like a bug elsewhere. Measured on this setup with a known grayscale ramp: the 8-bit
+    // surface Desktop Duplication hands back contains the content multiplied by the SDR
+    // white level (3.0 here) and re-encoded to sRGB, so everything above displayed value
+    // ~156 clips to pure white. Captured 17->35, 102->169, 154->252, 179->255, 230->255.
+    // That clipping happens before we ever see the pixels, so no post-processing can undo
+    // it - the only real fix is turning HDR off.
+    ComPtr<IDXGIOutput6> output6;
+    if (SUCCEEDED(foundOutput.As(&output6))) {
+        DXGI_OUTPUT_DESC1 desc1;
+        if (SUCCEEDED(output6->GetDesc1(&desc1))) {
+            const bool hdr = desc1.ColorSpace == DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020;
+            std::cout << "Output color space: " << (hdr ? "HDR10 (PQ)" : "SDR (sRGB)") << ", "
+                      << desc1.BitsPerColor << " bits/channel, max luminance " << desc1.MaxLuminance
+                      << " nits\n";
+            if (hdr) {
+                const float scale = QuerySdrWhiteScale(foundDesc.DeviceName);
+                std::cout << "\n  *** WARNING: HDR is enabled on this display. ***\n"
+                          << "  Captured highlights will clip to pure white (SDR white is at " << scale
+                          << "x, so anything\n"
+                          << "  brighter than ~" << static_cast<int>(255.0f / scale * 1.84f)
+                          << "/255 saturates). This is baked into the captured pixels and cannot be\n"
+                          << "  corrected afterwards. Turn HDR off in Settings > System > Display > HDR.\n\n";
+            }
+        }
+    }
+
     CreateDuplication();
 
+    m_sdrWhiteScale = QuerySdrWhiteScale(foundDesc.DeviceName);
+    // The staging texture is created lazily on the first acquired frame, from that
+    // texture's own format. DXGI_OUTDUPL_DESC.ModeDesc.Format is NOT reliable here: with
+    // HDR on it reports R16G16B16A16_FLOAT while the surface actually handed over is
+    // B8G8R8A8_UNORM. Trusting it makes the staging format mismatch, and
+    // CopySubresourceRegion has no HRESULT to return - it just silently copies nothing
+    // and every frame comes out black.
+
+}
+
+void DesktopCapture::CreateStagingTexture(DXGI_FORMAT format) {
+    if (format != DXGI_FORMAT_B8G8R8A8_UNORM && format != DXGI_FORMAT_R16G16B16A16_FLOAT) {
+        std::ostringstream oss;
+        oss << "Desktop Duplication handed over unsupported format " << format << " (expected "
+            << DXGI_FORMAT_B8G8R8A8_UNORM << " or " << DXGI_FORMAT_R16G16B16A16_FLOAT << ")";
+        throw std::runtime_error(oss.str());
+    }
+    m_format = format;
+
     D3D11_TEXTURE2D_DESC stagingDesc = {};
-    stagingDesc.Width = roiWidth;
-    stagingDesc.Height = roiHeight;
+    stagingDesc.Width = m_roiWidth;
+    stagingDesc.Height = m_roiHeight;
     stagingDesc.MipLevels = 1;
     stagingDesc.ArraySize = 1;
-    stagingDesc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+    stagingDesc.Format = format;
     stagingDesc.SampleDesc.Count = 1;
     stagingDesc.Usage = D3D11_USAGE_STAGING;
     stagingDesc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
     ThrowIfFailed(m_device->CreateTexture2D(&stagingDesc, nullptr, &m_stagingTex), "CreateTexture2D (staging)");
+
+    std::cout << "Capture format: " << format
+              << (format == DXGI_FORMAT_R16G16B16A16_FLOAT
+                      ? " (scRGB half-float, tone mapping to sRGB)"
+                      : " (8-bit BGRA)")
+              << "\n";
 }
 
 void DesktopCapture::CreateDuplication() {
@@ -142,6 +233,15 @@ bool DesktopCapture::AcquireFrame(uint32_t timeoutMs, const uint8_t** outData, u
 
     ComPtr<ID3D11Texture2D> frameTex;
     ThrowIfFailed(desktopResource.As(&frameTex), "QueryInterface ID3D11Texture2D");
+
+    // The acquired texture is the only authority on format. Build the staging texture to
+    // match it on first use, and rebuild if it ever changes underneath us (an HDR toggle
+    // arrives as ACCESS_LOST followed by a differently-formatted surface).
+    D3D11_TEXTURE2D_DESC frameDesc;
+    frameTex->GetDesc(&frameDesc);
+    if (!m_stagingTex || frameDesc.Format != m_format) {
+        CreateStagingTexture(frameDesc.Format);
+    }
 
     D3D11_BOX box;
     box.left = static_cast<UINT>(m_roiX);
