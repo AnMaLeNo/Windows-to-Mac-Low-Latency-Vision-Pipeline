@@ -41,28 +41,46 @@ HEADER_FORMAT = "<IQIHHI"  # little-endian, standard sizes, zero padding - match
 HEADER_SIZE = struct.calcsize(HEADER_FORMAT)  # 24
 ```
 
-## Clock sync — what the `e2e` number is worth
+## Latency measurement, and why it does not trust the clocks
 
-The debug overlay shows three timings:
+The debug overlay shows:
 
-- **`win`** — Windows-side capture → encode → send. Single machine, one monotonic clock. Exact.
-- **`mac`** — Mac-side packet received → detection drawn. Single machine, one monotonic clock. Exact.
-- **`e2e`** — capture on Windows → detection drawn on the Mac, i.e. the real glass-to-glass
-  number. Computed as `mac_clock_now - capture_wallclock_us + mac`. This one spans **two
-  machines' clocks**, so any offset between them lands directly in the result.
+- **`win`** — Windows-side capture → encode → send. One machine, one monotonic clock. Exact.
+- **`mac`** — Mac-side packet received → detection drawn. One machine, one monotonic clock. Exact.
+- **`net+`** — network delay *above the best case seen recently* (see below). Exact.
+- **`e2e~`** — the sum of the three. The tilde is deliberate: it understates true
+  glass-to-glass by exactly the irreducible one-way network hop, which on this LAN is
+  1-2ms (measured by `ping`).
 
-`e2e` is therefore only as trustworthy as the NTP sync between the two machines. Both should
-be actively syncing (`w32tm /resync` on Windows, System Settings → General → Date & Time →
-"Set time and date automatically" on macOS). A typical well-synced pair lands within a few
-milliseconds of each other; a machine that hasn't synced in a while can be off by tens or
-hundreds of milliseconds, which would swamp the measurement entirely.
+The obvious way to get end-to-end latency is to timestamp on Windows, subtract on the Mac,
+and be done. That does not work here. Measured on this pair: the Windows clock was **238ms
+behind** its own NTP server, stable across samples. A raw wall-clock delta would have
+reported ~240ms of "latency" that was purely clock skew — and indeed did, before this was
+diagnosed.
 
-**Sanity check:** `e2e` should be a bit larger than `win + mac` — the difference is network
-transit plus kernel queueing. If `e2e` comes out *smaller* than `win + mac`, or negative, the
-clocks are out of sync and the number is meaningless until they're resynced. Compare the gap
-against a quick `ping` round-trip if you want to confirm.
+This is not a misconfiguration to fix. Stock Windows `w32time` targets roughly one-second
+accuracy, not milliseconds; it reports its own error bound in `w32tm /query /status` as
+`Root Dispersion` (8s here). It also *slews* rather than steps offsets of this size, so
+`w32tm /resync` does not promptly correct it.
 
-`win` and `mac` never have this problem, so when in doubt they remain the reliable numbers.
+So the receiver self-calibrates instead. Queueing delay varies frame to frame and
+occasionally clears; a clock offset is constant. Therefore over a rolling window of frames:
+
+```
+min(transit)  ~=  clock_offset + best-case network hop
+net+          =   transit - min(transit)        # excess delay, offset-free
+```
+
+Subtracting the rolling minimum cancels the offset entirely and leaves the excess delay,
+which is what actually matters — it is where lag buildup under load shows up. The rolling
+window also tracks the offset as `w32time` slowly slews the clock mid-run.
+
+The residual error is one-way hop time (1-2ms on a wired/local LAN), stated rather than
+hidden. To check it, `ping` the other machine and halve the round-trip.
+
+To diagnose a suspected clock problem directly:
+`w32tm /stripchart /computer:time.windows.com /samples:6 /dataonly` on Windows prints the
+live offset against a reference server.
 
 ## Deliberately out of scope for v1
 

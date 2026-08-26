@@ -25,14 +25,18 @@ def main():
     cv2.namedWindow("debug", cv2.WINDOW_NORMAL)
     last_seq = None
 
-    # Rolling diagnostics. The key number is min(transit): transit is
-    # (this machine's clock - the Windows capture timestamp), so it equals
-    # true network transit PLUS whatever offset exists between the two clocks.
-    # Queueing delay varies frame to frame and occasionally clears, but a clock
-    # offset is constant - so the *minimum* transit over a few hundred frames is
-    # essentially the clock offset plus the best-case hop (~1-2ms on a LAN).
-    # min(transit) near zero => clocks agree, and any large e2e is real queueing.
-    # min(transit) large and steady => that much of e2e is just clock skew.
+    # transit = this machine's clock minus the Windows capture timestamp. It contains
+    # the real network delay AND the offset between the two machines' clocks, which is
+    # not small: stock Windows w32time targets ~1s accuracy, and this pair was measured
+    # 238ms apart. Taking transit at face value would report latency that is almost
+    # entirely clock skew.
+    #
+    # So we self-calibrate instead of trusting the clocks. Queueing delay varies frame
+    # to frame and occasionally clears; a clock offset is constant. Therefore
+    # min(transit) over a few hundred frames ~= clock_offset + best-case network hop,
+    # and subtracting it leaves the *excess* delay above best case - exact, and immune
+    # to any offset. A rolling window keeps this correct even as w32time slowly slews
+    # the Windows clock during a run.
     transit_samples = deque(maxlen=STATS_WINDOW)
     e2e_samples = deque(maxlen=STATS_WINDOW)
     frames_seen = 0
@@ -83,25 +87,31 @@ def main():
         # machines' clocks, so it is only as accurate as their NTP sync (see
         # docs/PROTOCOL.md); win/mac below are each single-machine and always exact.
         transit_ms = (recv_wallclock_us - capture_wallclock_us) / 1000
-        e2e_ms = transit_ms + mac_ms
         win_ms = capture_to_send_us / 1000
 
         transit_samples.append(transit_ms)
-        e2e_samples.append(e2e_ms)
         stale_dropped_total += dropped
         frames_seen += 1
 
+        # Excess network delay above the best case seen recently - this is where lag
+        # buildup shows up, and it carries no clock-offset error.
+        queue_ms = transit_ms - min(transit_samples)
+        # Everything we can account for honestly. Understates true glass-to-glass by
+        # exactly the irreducible one-way hop (~1-2ms on this LAN, per ping), which is
+        # far better than the ~238ms of clock skew a raw wall-clock delta would inject.
+        e2e_ms = win_ms + queue_ms + mac_ms
+        e2e_samples.append(e2e_ms)
+
         cv2.putText(
             annotated,
-            f"e2e={e2e_ms:.0f}ms (min {min(e2e_samples):.0f})  win={win_ms:.1f} mac={mac_ms:.1f}  seq={seq}",
+            f"e2e~{e2e_ms:.0f}ms  win={win_ms:.1f} net+={queue_ms:.1f} mac={mac_ms:.1f}  seq={seq}",
             (5, 15), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 0), 1,
         )
 
         if frames_seen % STATS_EVERY == 0:
             print(f"[stats] n={len(transit_samples)}  "
-                  f"transit min={min(transit_samples):.1f} med={statistics.median(transit_samples):.1f} "
-                  f"max={max(transit_samples):.1f}ms  |  "
-                  f"e2e min={min(e2e_samples):.1f} med={statistics.median(e2e_samples):.1f}ms  |  "
+                  f"e2e med={statistics.median(e2e_samples):.1f} max={max(e2e_samples):.1f}ms  |  "
+                  f"clock offset+hop={min(transit_samples):.1f}ms (calibrated out)  |  "
                   f"stale dropped={stale_dropped_total}", flush=True)
 
         cv2.imshow("debug", annotated)
