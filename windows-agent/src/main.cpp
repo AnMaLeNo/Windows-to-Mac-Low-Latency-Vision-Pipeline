@@ -24,12 +24,13 @@ constexpr int kRoiX = 1130;  // centered on a 2560x1440 primary screen
 constexpr int kRoiY = 570;
 constexpr int kRoiWidth = 300;
 constexpr int kRoiHeight = 300;
-// Keep this above 90: stb_image_write switches off 4:2:0 chroma subsampling only above
-// that threshold (stb_image_write.h:1479), and halved color resolution visibly smears
-// sharp UI content. Measured on real screen content with --bench: q85 = 7.4KB / 0.70ms
-// but subsampled, q95 = 13.7KB / 1.12ms at full color. Raw RGB would be 270KB, which
-// exceeds the 65507-byte UDP datagram limit outright.
-constexpr int kJpegQuality = 95;
+// stb_image_write uses 4:2:0 chroma subsampling at quality <= 90 and 4:4:4 above it
+// (stb_image_write.h:1479); 95 fixed 4:2:0's color smearing on sharp UI content but then
+// overflowed the 65507-byte UDP datagram limit on busier real content (measured with
+// --bench: 62KB at q91, didn't fit at all above that). Back to a fixed, content-agnostic
+// value rather than the quality-ladder fallback that would otherwise be needed to make a
+// high quality safe - check with --bench against real content before raising this again.
+constexpr int kJpegQuality = 85;
 constexpr const char* kMacIp = "192.168.1.127";  // milestone 3 smoke test over local Wi-Fi, pending the dedicated Ethernet link
 constexpr size_t kMaxJpegSize = 65507 - sizeof(PacketHeader);  // keeps the whole UDP payload under the safe limit
 
