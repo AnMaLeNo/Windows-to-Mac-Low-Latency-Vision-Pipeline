@@ -10,8 +10,8 @@ sides).
 | Offset | Size | Field | Type | Meaning |
 |---|---|---|---|---|
 | 0 | 4 | `sequence` | uint32 | Increments once per packet actually **sent**. Cursor-only DXGI updates are never sent, so this is not a raw capture-loop counter. Lets the receiver detect drops/reordering. |
-| 4 | 8 | `capture_ts_us` | uint64 | Windows-local **monotonic** microseconds since the agent process started. Not wall-clock, not comparable to anything on the Mac — only useful for computing Windows-side inter-frame cadence from consecutive deltas. |
-| 12 | 4 | `capture_to_send_us` | uint32 | Windows-local elapsed time from a successful frame acquire to immediately before `send()` — i.e. GPU crop + map + JPEG encode cost. Clock-sync-free and directly meaningful on its own. |
+| 4 | 8 | `capture_wallclock_us` | uint64 | **Unix epoch microseconds (UTC)** read on the Windows machine at capture time. The receiver subtracts this from its own clock to get true end-to-end latency — accurate only to the degree both machines are NTP-synced (see below). |
+| 12 | 4 | `capture_to_send_us` | uint32 | Windows-local elapsed time from a successful frame acquire to immediately before `send()` — i.e. GPU crop + map + JPEG encode cost. Clock-sync-free and directly meaningful on its own. Measured from *after* `AcquireNextFrame` returns, so the blocking wait for the desktop to change is excluded. |
 | 16 | 2 | `width` | uint16 | ROI width in pixels. |
 | 18 | 2 | `height` | uint16 | ROI height in pixels. |
 | 20 | 4 | `jpeg_size` | uint32 | Byte length of the JPEG payload that follows the header. |
@@ -41,19 +41,28 @@ HEADER_FORMAT = "<IQIHHI"  # little-endian, standard sizes, zero padding - match
 HEADER_SIZE = struct.calcsize(HEADER_FORMAT)  # 24
 ```
 
-## Clock-sync caveat
+## Clock sync — what the `e2e` number is worth
 
-`capture_ts_us` and any timestamp the Mac records on receive are **not** a valid basis for a
-true one-way glass-to-glass latency number unless both machines' wall clocks are synced (e.g.
-both on NTP). Without that, they're only useful for measuring jitter/inter-arrival gaps on
-each side independently.
+The debug overlay shows three timings:
 
-v1 approach: each side measures and logs only its own local processing duration —
-`capture_to_send_us` on Windows, an equivalent receive-to-detection-done duration computed
-locally on the Mac. Network transit time on the direct Gigabit link is treated as a small,
-separately-estimated constant (e.g. a quick `ping` once the cable is up) rather than derived
-from a cross-machine timestamp delta. Revisit only if a real cross-machine number turns out to
-be needed.
+- **`win`** — Windows-side capture → encode → send. Single machine, one monotonic clock. Exact.
+- **`mac`** — Mac-side packet received → detection drawn. Single machine, one monotonic clock. Exact.
+- **`e2e`** — capture on Windows → detection drawn on the Mac, i.e. the real glass-to-glass
+  number. Computed as `mac_clock_now - capture_wallclock_us + mac`. This one spans **two
+  machines' clocks**, so any offset between them lands directly in the result.
+
+`e2e` is therefore only as trustworthy as the NTP sync between the two machines. Both should
+be actively syncing (`w32tm /resync` on Windows, System Settings → General → Date & Time →
+"Set time and date automatically" on macOS). A typical well-synced pair lands within a few
+milliseconds of each other; a machine that hasn't synced in a while can be off by tens or
+hundreds of milliseconds, which would swamp the measurement entirely.
+
+**Sanity check:** `e2e` should be a bit larger than `win + mac` — the difference is network
+transit plus kernel queueing. If `e2e` comes out *smaller* than `win + mac`, or negative, the
+clocks are out of sync and the number is meaningless until they're resynced. Compare the gap
+against a quick `ping` round-trip if you want to confirm.
+
+`win` and `mac` never have this problem, so when in doubt they remain the reliable numbers.
 
 ## Deliberately out of scope for v1
 

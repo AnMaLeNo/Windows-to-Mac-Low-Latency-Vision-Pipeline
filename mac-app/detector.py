@@ -3,6 +3,11 @@ from ultralytics import YOLO
 
 WEIGHTS_PATH = "yolov8n.pt"  # swap this one line for your own trained model later
 
+# Class indices to keep. 0 is "person" in COCO - filtering here (rather than after the
+# fact) means non-person detections are discarded inside NMS, so they never reach
+# result.plot() either.
+CLASSES = [0]
+
 
 class Detector:
     def __init__(self, roi_w: int, roi_h: int):
@@ -15,4 +20,4 @@ class Detector:
         self.model.predict(dummy, device="mps", verbose=False)
 
     def infer(self, frame_bgr: np.ndarray):
-        return self.model.predict(frame_bgr, device="mps", verbose=False)[0]
+        return self.model.predict(frame_bgr, device="mps", classes=CLASSES, verbose=False)[0]

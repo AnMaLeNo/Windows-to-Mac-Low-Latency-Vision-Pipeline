@@ -18,12 +18,12 @@
 namespace {
 
 // --- v1 configuration: plain constants, edit + rebuild rather than adding a config file ---
-constexpr int kRoiX = 0;
-constexpr int kRoiY = 0;
+constexpr int kRoiX = 1130;  // centered on a 2560x1440 primary screen
+constexpr int kRoiY = 570;
 constexpr int kRoiWidth = 300;
 constexpr int kRoiHeight = 300;
 constexpr int kJpegQuality = 85;
-constexpr const char* kMacIp = "127.0.0.1";  // milestone 2: loopback; set to the Mac's real IP for milestone 3
+constexpr const char* kMacIp = "192.168.1.127";  // milestone 3 smoke test over local Wi-Fi, pending the dedicated Ethernet link
 constexpr size_t kMaxJpegSize = 65507 - sizeof(PacketHeader);  // keeps the whole UDP payload under the safe limit
 
 volatile std::sig_atomic_t g_stopRequested = 0;
@@ -83,19 +83,25 @@ int RunNetworkedLoop(DesktopCapture& capture) {
     auto* header = reinterpret_cast<PacketHeader*>(packetBuffer.data());
     uint8_t* jpegDst = packetBuffer.data() + sizeof(PacketHeader);
 
-    const auto processStart = std::chrono::steady_clock::now();
     uint32_t sequence = 0;
 
     std::cout << "Sending to " << kMacIp << ":" << kUdpPort << ". Ctrl+C to stop.\n";
 
     while (!g_stopRequested) {
-        const auto captureStart = std::chrono::steady_clock::now();
-
         const uint8_t* mappedData = nullptr;
         uint32_t rowPitch = 0;
         if (!capture.AcquireFrame(500, &mappedData, &rowPitch)) {
             continue;
         }
+
+        // Both clocks are read here, immediately after the frame arrives - NOT before
+        // AcquireFrame, which blocks until the desktop changes. Timing from before the
+        // block would fold idle waiting time into the measurement and make encode look
+        // far more expensive than it is.
+        const auto frameAcquired = std::chrono::steady_clock::now();
+        const auto captureWallclockUs = std::chrono::duration_cast<std::chrono::microseconds>(
+                                             std::chrono::system_clock::now().time_since_epoch())
+                                             .count();
 
         size_t jpegSize = EncodeBgraToJpeg(mappedData, rowPitch, kRoiWidth, kRoiHeight, kJpegQuality, jpegDst,
                                             kMaxJpegSize);
@@ -108,10 +114,9 @@ int RunNetworkedLoop(DesktopCapture& capture) {
 
         const auto sendStart = std::chrono::steady_clock::now();
         header->sequence = sequence++;
-        header->capture_ts_us = static_cast<uint64_t>(
-            std::chrono::duration_cast<std::chrono::microseconds>(captureStart - processStart).count());
+        header->capture_wallclock_us = static_cast<uint64_t>(captureWallclockUs);
         header->capture_to_send_us = static_cast<uint32_t>(
-            std::chrono::duration_cast<std::chrono::microseconds>(sendStart - captureStart).count());
+            std::chrono::duration_cast<std::chrono::microseconds>(sendStart - frameAcquired).count());
         header->width = static_cast<uint16_t>(kRoiWidth);
         header->height = static_cast<uint16_t>(kRoiHeight);
         header->jpeg_size = static_cast<uint32_t>(jpegSize);

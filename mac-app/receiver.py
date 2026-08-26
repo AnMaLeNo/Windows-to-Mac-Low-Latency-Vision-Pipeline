@@ -41,8 +41,9 @@ def main():
         sock.setblocking(True)
 
         recv_t0 = time.perf_counter()
+        recv_wallclock_us = time.time() * 1_000_000
 
-        seq, capture_ts_us, capture_to_send_us, width, height, jpeg_size = unpack_header(data)
+        seq, capture_wallclock_us, capture_to_send_us, width, height, jpeg_size = unpack_header(data)
         if last_seq is not None and seq != last_seq + 1:
             missing = seq - last_seq - 1
             lost_in_transit = missing - dropped
@@ -59,10 +60,16 @@ def main():
         result = detector.infer(frame)
         annotated = result.plot()
 
-        infer_done_us = int((time.perf_counter() - recv_t0) * 1_000_000)
+        mac_ms = (time.perf_counter() - recv_t0) * 1000
+        # True glass-to-glass: capture on Windows -> detection drawn here. Spans two
+        # machines' clocks, so it is only as accurate as their NTP sync (see
+        # docs/PROTOCOL.md); win/mac below are each single-machine and always exact.
+        e2e_ms = (recv_wallclock_us - capture_wallclock_us) / 1000 + mac_ms
+        win_ms = capture_to_send_us / 1000
+
         cv2.putText(
             annotated,
-            f"seq={seq} win={capture_to_send_us}us mac={infer_done_us}us",
+            f"e2e={e2e_ms:.0f}ms  win={win_ms:.1f} mac={mac_ms:.1f}  seq={seq}",
             (5, 15), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 0), 1,
         )
 

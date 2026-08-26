@@ -4,7 +4,7 @@
 #pragma pack(push, 1)
 struct PacketHeader {
     uint32_t sequence;
-    uint64_t capture_ts_us;
+    uint64_t capture_wallclock_us;  // Unix epoch microseconds (UTC) at the moment the frame was captured
     uint32_t capture_to_send_us;
     uint16_t width;
     uint16_t height;

@@ -8,5 +8,10 @@ UDP_PORT = 50505
 
 
 def unpack_header(data: bytes):
-    """Returns (sequence, capture_ts_us, capture_to_send_us, width, height, jpeg_size)."""
+    """Returns (sequence, capture_wallclock_us, capture_to_send_us, width, height, jpeg_size).
+
+    capture_wallclock_us is Unix epoch microseconds (UTC) taken on the Windows machine at
+    capture time - comparing it against this machine's clock is only meaningful if both
+    machines are NTP-synced. See docs/PROTOCOL.md.
+    """
     return struct.unpack(HEADER_FORMAT, data[:HEADER_SIZE])
