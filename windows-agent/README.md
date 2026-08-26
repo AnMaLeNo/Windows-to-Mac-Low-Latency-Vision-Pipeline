@@ -21,6 +21,10 @@ directly in Visual Studio also works — it auto-detects `CMakePresets.json`.)
 - `capture_agent.exe --dump 10` — capture 10 real (non-cursor-only) frames and write them as
   `out\capture_0000.jpg` … to disk. No networking involved; use this first to confirm the ROI
   position/size and JPEG colors look right.
+- `capture_agent.exe --bench` — capture one frame and encode it across a sweep of JPEG
+  qualities, reporting payload size and encode cost for each. Use this to pick `kJpegQuality`
+  against your actual screen content. Note the jump at quality 91, where chroma subsampling
+  turns off — below it, color resolution is halved and sharp UI content smears.
 - `capture_agent.exe` — run the real capture → encode → UDP send loop, targeting the IP/port
   configured as constants at the top of `src/main.cpp`. Ctrl+C to stop.
 

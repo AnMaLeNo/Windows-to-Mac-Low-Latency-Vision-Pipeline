@@ -22,7 +22,12 @@ constexpr int kRoiX = 1130;  // centered on a 2560x1440 primary screen
 constexpr int kRoiY = 570;
 constexpr int kRoiWidth = 300;
 constexpr int kRoiHeight = 300;
-constexpr int kJpegQuality = 85;
+// Keep this above 90: stb_image_write switches off 4:2:0 chroma subsampling only above
+// that threshold (stb_image_write.h:1479), and halved color resolution visibly smears
+// sharp UI content. Measured on real screen content with --bench: q85 = 7.4KB / 0.70ms
+// but subsampled, q95 = 13.7KB / 1.12ms at full color. Raw RGB would be 270KB, which
+// exceeds the 65507-byte UDP datagram limit outright.
+constexpr int kJpegQuality = 95;
 constexpr const char* kMacIp = "192.168.1.127";  // milestone 3 smoke test over local Wi-Fi, pending the dedicated Ethernet link
 constexpr size_t kMaxJpegSize = 65507 - sizeof(PacketHeader);  // keeps the whole UDP payload under the safe limit
 
@@ -71,6 +76,44 @@ int RunDumpMode(DesktopCapture& capture, int frameCount) {
         std::cout << "wrote " << path << " (" << jpegSize << " bytes)\n";
         ++written;
     }
+    return 0;
+}
+
+// Captures one real frame and encodes it across a sweep of JPEG qualities, reporting size
+// and encode cost for each. Answers "what is compression actually buying, and what does
+// better quality cost?" against real screen content rather than guesswork. Note the jump
+// at quality 91: stb_image_write switches off 4:2:0 chroma subsampling above 90
+// (stb_image_write.h:1479), which is what fixes color smearing on sharp UI content.
+int RunBenchMode(DesktopCapture& capture) {
+    const uint8_t* mappedData = nullptr;
+    uint32_t rowPitch = 0;
+    while (!capture.AcquireFrame(500, &mappedData, &rowPitch)) {
+        if (g_stopRequested) return 0;
+    }
+
+    std::vector<uint8_t> buf(kMaxJpegSize);
+    const size_t rawSize = static_cast<size_t>(kRoiWidth) * kRoiHeight * 3;
+    std::cout << "\nRaw RGB " << kRoiWidth << "x" << kRoiHeight << " = " << rawSize
+              << " bytes (UDP datagram limit is 65507 - does not fit)\n\n"
+              << "quality   bytes   vs raw   encode   chroma\n";
+
+    for (int q : {70, 80, 85, 90, 91, 95, 100}) {
+        // Encode a few times and keep the best - one-shot timings at this scale are
+        // dominated by scheduler noise.
+        size_t size = 0;
+        double bestMs = 1e9;
+        for (int i = 0; i < 5; ++i) {
+            const auto t0 = std::chrono::steady_clock::now();
+            size = EncodeBgraToJpeg(mappedData, rowPitch, kRoiWidth, kRoiHeight, q, buf.data(), buf.size());
+            const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+            if (ms < bestMs) bestMs = ms;
+        }
+        std::printf("%7d %7zu %7.1fx %7.2fms   %s\n", q, size, static_cast<double>(rawSize) / size, bestMs,
+                    q <= 90 ? "4:2:0 (halved)" : "4:4:4 (full)");
+    }
+
+    capture.UnmapFrame();
+    std::cout << "\n";
     return 0;
 }
 
@@ -133,8 +176,9 @@ int RunNetworkedLoop(DesktopCapture& capture) {
 int main(int argc, char** argv) {
     std::signal(SIGINT, OnSigInt);
 
+    const std::string mode = argc >= 2 ? argv[1] : "";
     int dumpFrameCount = 0;
-    if (argc >= 3 && std::string(argv[1]) == "--dump") {
+    if (argc >= 3 && mode == "--dump") {
         dumpFrameCount = std::atoi(argv[2]);
     }
 
@@ -142,6 +186,9 @@ int main(int argc, char** argv) {
         std::cout << "ROI=(" << kRoiX << "," << kRoiY << ") " << kRoiWidth << "x" << kRoiHeight << "\n";
         DesktopCapture capture(kRoiX, kRoiY, kRoiWidth, kRoiHeight);
 
+        if (mode == "--bench") {
+            return RunBenchMode(capture);
+        }
         if (dumpFrameCount > 0) {
             std::cout << "Dump mode: capturing " << dumpFrameCount << " real frames to out\\capture_NNNN.jpg\n";
             return RunDumpMode(capture, dumpFrameCount);
