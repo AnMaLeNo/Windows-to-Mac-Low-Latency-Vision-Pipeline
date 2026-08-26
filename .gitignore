@@ -4,3 +4,4 @@ tools/received/
 mac-app/venv/
 mac-app/__pycache__/
 mac-app/*.pt
+firmware/*/.pio/

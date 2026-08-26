@@ -17,9 +17,17 @@ python receiver.py
 ```
 
 A window titled "debug" shows the received ROI feed with detection boxes and a per-frame
-timing overlay. Press `q` in that window to quit. The first run downloads `yolov8n.pt`
+timing overlay. A crosshair marks the ROI's centre pixel — the pixel the trigger rule tests —
+and turns red when the trigger is firing. Press `q` in that window to quit. The first run downloads `yolov8n.pt`
 automatically (stock COCO weights, just to validate the pipeline end to end — swap the
 `WEIGHTS_PATH` constant in `detector.py` for your own trained model later).
+
+## Trigger hardware
+
+`receiver.py` looks for the ESP32 on `/dev/cu.*` at startup and connects automatically. If
+nothing is plugged in it prints `no serial device found` and runs the vision pipeline alone,
+so the detector is always usable without the hardware attached. Wiring, protocol and the
+watchdog are in [`docs/TRIGGER.md`](../docs/TRIGGER.md).
 
 ## Networking
 

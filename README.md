@@ -7,7 +7,9 @@ project optimizes for — not throughput, not image fidelity.
 
 - [`windows-agent/`](windows-agent/) — C++ capture + send agent (DXGI Desktop Duplication → GPU-side crop → JPEG → UDP). See [`windows-agent/README.md`](windows-agent/README.md) to build and run.
 - [`mac-app/`](mac-app/) — Python + Ultralytics receiver (UDP → JPEG decode → YOLO → debug visualization). See [`mac-app/README.md`](mac-app/README.md) to set up and run.
+- [`firmware/`](firmware/) — the two Arduino sketches that turn a detection back into a keypress on the PC: `esp32-link/` (USB serial from the Mac → GPIO) and `pro-micro-hid/` (GPIO → USB HID keyboard).
 - [`docs/PROTOCOL.md`](docs/PROTOCOL.md) — the wire format shared by both sides.
+- [`docs/TRIGGER.md`](docs/TRIGGER.md) — the trigger rule, the Mac→ESP32→Pro Micro link, and its wiring.
 
 ## Status
 
@@ -17,3 +19,4 @@ Bring-up milestones, in order:
 1. Windows agent captures the ROI and writes JPEGs to disk (`--dump N`), no networking — verifies capture/crop/encode correctness in isolation.
 2. Windows agent sends over loopback UDP to a local test listener (`tools/udp_test_listener.py`) — verifies the wire protocol end-to-end on one machine.
 3. Real hand-off: Windows agent points at the Mac's actual IP over the direct Ethernet link; `mac-app/receiver.py` runs on the Mac.
+4. Trigger loop closed: a person on the ROI's centre pixel holds a key down on the PC, via ESP32 → Pro Micro. See [`docs/TRIGGER.md`](docs/TRIGGER.md).
