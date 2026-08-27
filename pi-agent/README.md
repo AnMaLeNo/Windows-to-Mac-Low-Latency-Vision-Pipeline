@@ -191,6 +191,30 @@ up (250ms timeout plus the watchdog's check granularity).
 Note what it does *not* touch: keys held on the **physical** keyboard. Those are
 released by their own key-up events, or wholesale if the receiver disappears.
 
+## Verified on hardware
+
+Pi 5 + CH340 ESP32 + Arduino Micro, 2026-08-27. The Pro Micro was plugged into the
+**Pi** rather than the PC for these, so its HID output came back to the same machine
+and every hop became observable from one place — see
+[`tools/loopback_check.py`](tools/loopback_check.py).
+
+| | |
+|---|---|
+| Whole chain, trigger → keypress | `KEY_K` down, held, up. The host's auto-repeat fires while held, which is what proves it is *held* and not re-typed |
+| Both sources merged | `a` held → `KEY_A`; person arrives → `KEY_K` joins it; `a` released → only `KEY_A` goes up |
+| Key sequence | `a`, `b`, `c` each down-then-up, in order |
+| Pi → ESP32 link, 2000 frames | **2000/2000 received, 0 checksum failures**, driven at 936 frames/s — 81% of the line's capacity and ~19× the operational rate |
+
+That last row is what settles 115200 on this CH340: the rate the project already
+distrusted turns out to be error-free well past what this system asks of it.
+
+Two behaviours worth knowing, both benign:
+
+- **Closing the serial port resets the ESP32.** RTS is wired to `EN`, so the board
+  reboots whenever piproxy stops, taking its frame counters with it. The link is back
+  in ~300ms, and the Pro Micro's watchdog releases every key in the meantime.
+- **The `?` statistics only survive an unbroken connection**, for the same reason.
+
 ## Measured latency
 
 Trigger path, Mac → Pi (ICMP RTT, 25 samples each). The Pi answers on both of its

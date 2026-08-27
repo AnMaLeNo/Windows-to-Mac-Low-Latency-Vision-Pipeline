@@ -35,7 +35,14 @@ DEFAULT_NAME_HINTS = ("keyboard", "keybd", "logitech", "usb receiver", "wireless
 # Devices that must never be grabbed even if they match: taking the Pi's own power
 # button away is how you lose the ability to shut the machine down cleanly, and the
 # HDMI nodes register as keyboards but only ever emit CEC events.
-NAME_BLOCKLIST = ("pwr_button", "vc4-hdmi", "power button")
+#
+# The Arduino entries guard against something worse. During bring-up the Pro Micro is
+# plugged into the Pi rather than the PC, so this proxy's own HID output arrives back
+# here as an ordinary keyboard. Forwarding it would feed every keystroke into the
+# chain that produced it - an unbounded loop, at USB speed, on a device whose job is
+# to type. Refusing by name is cheap; recovering from the loop is not.
+NAME_BLOCKLIST = ("pwr_button", "vc4-hdmi", "power button",
+                  "arduino", "pro micro", "keyboard proxy")
 
 RESCAN_INTERVAL_S = 1.0
 
