@@ -200,7 +200,23 @@ def open_trigger(target: Optional[str] = None):
     if target.startswith("serial://") or target == "auto":
         port = target[len("serial://"):] if target.startswith("serial://") else find_port()
         if not port:
-            print("[trigger] no serial device found - running without a trigger link")
+            # Loud on purpose. "auto" looks for a serial port *on this Mac*, which is
+            # correct only for the original ESP32-on-the-Mac wiring. Once the link
+            # moved to the Pi there is nothing here to find, and the old one-line
+            # notice scrolled past unnoticed while the vision pipeline ran perfectly
+            # and pressed nothing - the hardest kind of failure to trace, because
+            # every part you would think to check is working.
+            print("\n" + "=" * 72)
+            print("  NO TRIGGER LINK - detections will not press anything.")
+            print()
+            print("  TRIGGER_TARGET is 'auto', which looks for a USB serial device on")
+            print("  this Mac, and there is none. If the keyboard proxy runs on the")
+            print("  Raspberry Pi, point at it explicitly:")
+            print()
+            print("      TRIGGER_TARGET=udp://raspberrypi.local:48010 python3 receiver.py")
+            print()
+            print("  Set TRIGGER_TARGET=none to silence this and run vision only.")
+            print("=" * 72 + "\n")
             return NullTrigger()
         try:
             transport = SerialTransport(port)
