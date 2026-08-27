@@ -7,6 +7,7 @@ project optimizes for — not throughput, not image fidelity.
 
 - [`windows-agent/`](windows-agent/) — C++ capture + send agent (DXGI Desktop Duplication → GPU-side crop → JPEG → UDP). See [`windows-agent/README.md`](windows-agent/README.md) to build and run.
 - [`mac-app/`](mac-app/) — Python + Ultralytics receiver (UDP → JPEG decode → YOLO → debug visualization). See [`mac-app/README.md`](mac-app/README.md) to set up and run.
+- [`pi-agent/`](pi-agent/) — Raspberry Pi keyboard proxy. The real keyboard plugs into the Pi, which forwards it to the PC and injects the trigger key into the same stream, so **the PC sees exactly one keyboard**. See [`pi-agent/README.md`](pi-agent/README.md).
 - [`firmware/`](firmware/) — the two Arduino sketches that turn a detection back into a keypress on the PC: `esp32-link/` (USB serial from the Mac → GPIO) and `pro-micro-hid/` (GPIO → USB HID keyboard).
 - [`docs/PROTOCOL.md`](docs/PROTOCOL.md) — the wire format shared by both sides.
 - [`docs/TRIGGER.md`](docs/TRIGGER.md) — the trigger rule, the Mac→ESP32→Pro Micro link, and its wiring.
@@ -20,3 +21,4 @@ Bring-up milestones, in order:
 2. Windows agent sends over loopback UDP to a local test listener (`tools/udp_test_listener.py`) — verifies the wire protocol end-to-end on one machine.
 3. Real hand-off: Windows agent points at the Mac's actual IP over the direct Ethernet link; `mac-app/receiver.py` runs on the Mac.
 4. Trigger loop closed: a person on the ROI's centre pixel holds a key down on the PC, via ESP32 → Pro Micro. See [`docs/TRIGGER.md`](docs/TRIGGER.md).
+5. **One keyboard, not two.** The PC must not see a second keyboard alongside the real one, so the real keyboard's receiver moves to a Raspberry Pi that forwards it *and* the trigger as a single HID stream. Mac → Pi is one UDP byte, same protocol as the ESP32 link. See [`pi-agent/README.md`](pi-agent/README.md). Trigger path and watchdog verified against the Pi; keyboard capture and the output sink are not yet on hardware.
