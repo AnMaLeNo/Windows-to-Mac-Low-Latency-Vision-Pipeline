@@ -81,27 +81,44 @@ you do attach hardware you already know everything above it works.
 python3 -m piproxy --sink serial --serial-port /dev/ttyUSB0
 ```
 
-The Pi sends framed reports over a UART to a Pro Micro plugged into the PC, which
-enumerates as the USB HID keyboard. **This is the recommended path on a Pi that is
-already doing other work**, because it changes nothing about the Pi: no `config.txt`
-edit, no reboot, no change to how the Pi is powered. The receiver goes in a USB-A
-port, which is a host port — exactly what USB-A is for.
+The Pi sends framed reports to a Pro Micro plugged into the PC, which enumerates as
+the USB HID keyboard. **This is the recommended path on a Pi that is already doing
+other work**, because it changes nothing about the Pi: no `config.txt` edit, no
+reboot, no change to how the Pi is powered. The receiver goes in a USB-A port, which
+is a host port — exactly what USB-A is for.
 
-Framing matters here in a way it did not for the old one-byte trigger link: a dropped
-byte would desynchronise every following report. Each is wrapped in a `0xAB` start
-byte and an XOR checksum, and the firmware resynchronises on the next valid header.
+The two cannot be wired directly: the Pro Micro is a USB *device* on the PC and the
+Pi's USB-A ports are hosts, so an ESP32 bridges USB serial to a UART.
 
-Baud defaults to **1000000, not 921600**. On a 16MHz ATmega32U4 the U2X divisor for
-1Mbaud is exact, while 921600 rounds to the same divisor and lands 8.5% off — the
-"faster-looking" rate is the broken one.
+```
+Pi ──USB (CH340)──> ESP32 ──GPIO4 (UART TX)──> Pro Micro D0/RX
+                      GND ────────────────────> Pro Micro GND
+```
 
-> **Wiring, and one way to destroy the Pi.** Pi `GPIO14/TXD` (pin 8) → Pro Micro `D0/RX`,
-> and `GND` → `GND`. **Never wire the Pro Micro's TX back to the Pi.** Pi GPIO is 3.3V
-> and *not* 5V tolerant; the Pro Micro's 5V TX would damage the SoC. This link only
-> ever needs to run one way.
+Both firmwares are in [`firmware/`](../firmware): `esp32-proxy/` and
+`pro-micro-proxy/`. They replace `esp32-link/` and `pro-micro-hid/`, which
+implemented the older 1-bit trigger link and cannot carry an 8-byte report.
+
+> **Moving from the old wiring.** The ESP32 end stays on GPIO 4 — `esp32-proxy`
+> remaps its UART TX onto that pin precisely so an existing wire does not move. The
+> Pro Micro end **must** move from `D2` to `D0/RX`: `D2` is not a UART pin on the
+> ATmega32U4, and no firmware can make it one.
 >
-> Using a USB-serial adapter on a Pi USB-A port instead of the GPIO header avoids the
-> question entirely and needs no `config.txt` change to enable the UART.
+> **Never wire the Pro Micro's TX back to anything here.** It is a 5V output; this
+> link only ever needs to run one way.
+
+Framing matters in a way it did not for the old one-byte link: a dropped byte would
+desynchronise every following report. Each is wrapped in a `0xAB` start byte and an
+XOR checksum, and both firmwares resynchronise on the next valid header.
+
+Baud is **115200 across all three ends**, set by the CH340 between the Pi and the
+ESP32 — clones of it get unreliable well before the AVR does, as `docs/TRIGGER.md`
+already recorded. A 10-byte frame costs 868µs, which is not where the latency is. If
+you ever raise it, note the AVR is *exact* at 1000000 and 8.5% off at 921600: the
+faster-looking rate is the broken one.
+
+Send `?` to the ESP32 on the USB serial line and it reports frame counts, so link
+quality is measurable without a logic analyser.
 
 ### C. `hidg` — the Pi is the keyboard
 
