@@ -73,10 +73,25 @@ class SerialSink(Sink):
     def __init__(self, port: str, baud: int = 115200):
         import serial  # imported lazily so the log sink needs no pyserial
 
-        # write_timeout=0 makes writes non-blocking. If the Pro Micro ever stops
+        # DTR and RTS must be deasserted BEFORE the port opens. On an ESP32 devkit
+        # those two lines drive the auto-reset circuit - RTS goes to EN - so opening
+        # the port the ordinary way asserts RTS and holds the chip in reset for as
+        # long as we have it open. The board then looks dead, and the symptom is a
+        # silent link rather than an error. Constructing the Serial without a port
+        # and opening it afterwards is the only way pyserial lets us set these first.
+        self.ser = serial.Serial()
+        self.ser.port = port
+        self.ser.baudrate = baud
+        self.ser.timeout = 0
+        # write_timeout=0 makes writes non-blocking. If the bridge ever stops
         # draining, a blocking write would stall the thread that owns keyboard
         # input - a serial hiccup must never become typing latency.
-        self.ser = serial.Serial(port, baud, timeout=0, write_timeout=0)
+        self.ser.write_timeout = 0
+        self.ser.dtr = False
+        self.ser.rts = False
+        self.ser.open()
+        self.ser.dtr = False
+        self.ser.rts = False
         self.port = port
         self.baud = baud
         self.dropped = 0
