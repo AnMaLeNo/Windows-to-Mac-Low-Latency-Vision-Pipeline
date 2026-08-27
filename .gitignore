@@ -8,3 +8,4 @@ firmware/*/.pio/
 
 # PlatformIO build output
 .pio/
+__pycache__/
