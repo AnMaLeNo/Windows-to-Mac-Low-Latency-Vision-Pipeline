@@ -5,3 +5,6 @@ mac-app/venv/
 mac-app/__pycache__/
 mac-app/*.pt
 firmware/*/.pio/
+
+# PlatformIO build output
+.pio/
