@@ -70,7 +70,7 @@ class SerialSink(Sink):
     name = "serial"
     START = 0xAB
 
-    def __init__(self, port: str, baud: int = 1_000_000):
+    def __init__(self, port: str, baud: int = 115200):
         import serial  # imported lazily so the log sink needs no pyserial
 
         # write_timeout=0 makes writes non-blocking. If the Pro Micro ever stops

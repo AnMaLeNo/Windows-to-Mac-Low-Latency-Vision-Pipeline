@@ -28,9 +28,9 @@ def parse_args(argv=None):
                           "(default); serial = UART to the Pro Micro; hidg = this "
                           "machine is the USB gadget")
     out.add_argument("--serial-port", help="e.g. /dev/ttyUSB0 (with --sink serial)")
-    out.add_argument("--baud", type=int, default=1_000_000,
-                     help="serial baud (default 1000000: an exact divisor on a 16MHz "
-                          "ATmega32U4, unlike 921600)")
+    out.add_argument("--baud", type=int, default=115200,
+                     help="serial baud (default 115200, set by the CH340 hop to the "
+                          "ESP32; must match both firmwares)")
     out.add_argument("--hid-device", default="/dev/hidg0",
                      help="gadget node (with --sink hidg)")
     out.add_argument("--echo-repeats", action="store_true",

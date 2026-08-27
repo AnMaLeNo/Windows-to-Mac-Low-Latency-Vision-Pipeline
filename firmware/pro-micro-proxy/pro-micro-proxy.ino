@@ -18,12 +18,16 @@
 
 #include <HID.h>
 
-static const uint32_t BAUD = 1000000;  // must match --baud in piproxy
+static const uint32_t BAUD = 115200;  // must match esp32-proxy and --baud in piproxy
 
-// Why 1000000 and not 921600, which looks faster: on a 16MHz ATmega32U4 the U2X
-// divisor for 1Mbaud is exactly 1, while 921600 rounds to that same divisor and ends
-// up 8.5% off - far outside the ~2% a UART tolerates. The "slower" rate is the only
-// one of the two that actually works here.
+// 115200 because the slowest link in the chain sets the rate, and that is the CH340
+// between the Pi and the ESP32 - clones of it get unreliable well before this AVR
+// does. A 10-byte frame costs 868us at this rate, on a budget of a few milliseconds,
+// so the ceiling is not worth chasing.
+//
+// If you ever do raise it: this chip is *exact* at 1000000 (the U2X divisor is 1) and
+// 8.5% off at 921600, which is outside what a UART tolerates. The faster-looking rate
+// is the broken one. All three ends must change together.
 
 static const uint8_t  START_BYTE  = 0xAB;
 static const uint8_t  REPORT_LEN  = 8;
