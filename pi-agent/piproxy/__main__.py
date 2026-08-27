@@ -116,8 +116,20 @@ def main(argv=None) -> int:
                   "or pass --no-keyboard to run trigger-only.", file=sys.stderr)
             return 2
 
-    trigger = TriggerReceiver(state, emitter, watchdog, trigger_usage,
-                              port=args.udp_port)
+    try:
+        trigger = TriggerReceiver(state, emitter, watchdog, trigger_usage,
+                                  port=args.udp_port)
+    except OSError as exc:
+        # Almost always the systemd service already holding the port. Say so, rather
+        # than making the user decode an errno - two instances competing for the same
+        # trigger stream is exactly the failure this refuses to allow.
+        print(f"error: cannot listen on UDP :{args.udp_port} ({exc})\n"
+              f"Another piproxy is probably already running. Check with:\n"
+              f"    systemctl status piproxy\n"
+              f"Stop it first (sudo systemctl stop piproxy), or pass a different "
+              f"--udp-port.", file=sys.stderr)
+        sink.close()
+        return 2
     ctx = AgentContext(state, emitter, watchdog, keyboard, trigger, sink)
 
     # Output first: nothing may generate a keypress before there is somewhere to put it.

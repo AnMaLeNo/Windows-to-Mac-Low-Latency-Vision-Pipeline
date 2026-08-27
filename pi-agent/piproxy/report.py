@@ -61,6 +61,20 @@ class KeyState:
         with self._lock:
             self._modifiers = mask & 0xFF
 
+    def set_modifier_bit(self, bit: int, down: bool) -> None:
+        """Set or clear one modifier bit atomically.
+
+        The read-modify-write has to happen under a single lock acquisition. Doing it
+        as snapshot-then-set would let a second modifier event land in between and be
+        overwritten - and a lost Shift release is a keyboard that types in capitals
+        until you press Shift again.
+        """
+        with self._lock:
+            if down:
+                self._modifiers |= bit
+            else:
+                self._modifiers &= ~bit
+
     def clear_physical(self) -> None:
         """Drop every physical key. Used when the keyboard disconnects, so its keys
         cannot stay held on the PC by a device that is no longer even present."""

@@ -142,8 +142,7 @@ class KeyboardReader:
 
         bit = MODIFIER_BITS.get(code)
         if bit is not None:
-            snap = self.state.snapshot()["modifiers"]
-            self.state.set_modifiers(snap | bit if value == VALUE_DOWN else snap & ~bit)
+            self.state.set_modifier_bit(bit, value == VALUE_DOWN)
             self.emitter.nudge()
             return
 

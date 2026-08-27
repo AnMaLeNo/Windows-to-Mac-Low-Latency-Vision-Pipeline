@@ -41,7 +41,11 @@ class TriggerReceiver:
         self.watchdog = watchdog
         self.trigger_usage = trigger_usage
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        # Deliberately NO SO_REUSEADDR. On UDP it buys nothing - there is no TIME_WAIT
+        # to work around - and it lets a second instance bind this port successfully,
+        # after which the kernel hands each datagram to one of them and the trigger
+        # silently goes to whichever process you were not looking at. Failing the bind
+        # is the correct, loud behaviour.
         self.sock.bind((host, port))
         self.host, self.port = host, port
         self.packets = 0
