@@ -73,8 +73,11 @@ def main(argv=None) -> int:
         from .keyboard import list_keyboards
         found = list_keyboards()
         if not found:
-            print("No keyboard-like input device found.")
-            print("Plug the Logitech receiver into a USB-A port and try again.")
+            # stderr, not stdout: a listing that found nothing must print nothing to
+            # stdout, so callers can treat "any output" as "found something".
+            print("No keyboard-like input device found.\n"
+                  "Plug the Logitech receiver into a USB-A port and try again.",
+                  file=sys.stderr)
             return 1
         for d in found:
             print(f"{d['path']}\t{d['name']}")
