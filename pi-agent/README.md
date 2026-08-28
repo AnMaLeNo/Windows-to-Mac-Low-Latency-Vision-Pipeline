@@ -240,6 +240,52 @@ Nothing in the code changes, only `TRIGGER_TARGET`.
 Keystroke path (not yet measured on hardware): receiver → Pi USB poll (1ms) →
 userspace → sink → PC. Expect ~2–4ms added over a directly-connected keyboard.
 
+## When nothing is being typed
+
+Read `/status` before touching any hardware. Four fields answer almost everything,
+and each points somewhere different:
+
+```bash
+curl -s localhost:48011/status | python3 -m json.tool
+```
+
+| what you see | what it means |
+|---|---|
+| `trigger.packets: 0` | the Mac has never sent anything. `TRIGGER_TARGET` is unset or wrong — see [`mac-app/README.md`](../mac-app/README.md) |
+| `sink.connected: false` | the bridge is unplugged or renamed. `last_error` says which; it retries every second |
+| `emitter.alive: false` | should be impossible; the process exits so systemd restarts it |
+| `keyboard.attached: []` | the receiver is not visible, or another process holds it |
+
+The trap this system is built around: **everything can look healthy while nothing is
+pressed.** Detection fires, the crosshair turns red, the service is `active`, both
+firmwares are flashed and the wiring is right — and `trigger.packets` is still 0
+because the Mac was never told where to send. `/status` is the only place that says so.
+
+### Unplugging the USB bridge
+
+Handled, but worth knowing what happens. Linux renames the device on reattach —
+`ttyUSB0` becomes `ttyUSB1` — so `setup.sh` installs a udev rule giving it a name
+that does not move:
+
+```
+/dev/piproxy-link -> ttyUSB0     (keyed on USB identity, not attachment order)
+```
+
+Use that path in `/etc/default/piproxy`, never a raw `ttyUSB*`. The sink also falls
+back to searching if the configured node vanishes, but a config that reads correctly
+beats one that only works because something recovers from it.
+
+Verified by unbinding the device at the kernel level, which is indistinguishable from
+pulling the cable:
+
+```
+[sink:serial] link lost (write failed: [Errno 5] Input/output error); will reconnect
+[sink:serial] reconnected on /dev/piproxy-link
+```
+
+`reconnects` in `/status` counts these. During the gap the Pro Micro's watchdog
+releases every key, so nothing is left held by a link that no longer exists.
+
 ## Things that will bite
 
 **`EVIOCGRAB` is what stops the Pi typing too.** Without the grab, every keystroke you
