@@ -205,7 +205,17 @@ class AgentContext:
         return {
             "sink": {
                 "kind": self.sink.name,
+                # connected is the field to look at when reports stop arriving at
+                # the PC while everything else here looks healthy.
+                "connected": self.sink.healthy,
+                "port": getattr(self.sink, "port", None),
                 "dropped": getattr(self.sink, "dropped", 0),
+                "reconnects": getattr(self.sink, "reconnects", 0),
+                "last_error": getattr(self.sink, "last_error", None),
+            },
+            "emitter": {
+                "alive": self.emitter.alive,
+                "errors": self.emitter.errors,
             },
             "keyboard": self.keyboard.status() if self.keyboard else
                         {"attached": [], "note": "capture disabled"},

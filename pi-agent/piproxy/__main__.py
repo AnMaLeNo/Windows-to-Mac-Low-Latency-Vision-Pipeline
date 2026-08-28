@@ -158,7 +158,20 @@ def main(argv=None) -> int:
     stop = threading.Event()
     signal.signal(signal.SIGINT, lambda *_: stop.set())
     signal.signal(signal.SIGTERM, lambda *_: stop.set())
-    stop.wait()
+
+    # Supervise the emitter rather than just sleeping. If it ever stops - it is
+    # guarded against sink failures now, but not against every possible bug - then
+    # keypresses have nowhere to go while the keyboard stays grabbed, which takes
+    # the user's keyboard away with systemd still reporting the service healthy.
+    # Exiting hands the problem to Restart=always, which fixes it in a second.
+    while not stop.wait(1.0):
+        if not emitter.alive:
+            print("[piproxy] the emitter thread died; exiting so systemd restarts us",
+                  file=sys.stderr, flush=True)
+            if keyboard:
+                keyboard.stop()   # let go of the keyboard before we go
+            sink.close()
+            return 1
 
     print("\n[piproxy] shutting down; releasing all keys", flush=True)
     if http:

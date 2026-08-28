@@ -91,7 +91,37 @@ for grp in input dialout; do
     fi
 done
 
-# --- 4. configuration --------------------------------------------------------------
+# --- 4. a stable name for the serial bridge ------------------------------------------
+# Linux numbers tty devices in attachment order, so unplugging the bridge and plugging
+# it back in renames it - ttyUSB0 becomes ttyUSB1 - and a config pinned to the old path
+# points at nothing. The symlink is keyed on the USB identity instead, which does not
+# change. (The sink also falls back to searching, but a config that reads correctly is
+# better than one that only works because something recovers from it.)
+
+step "Stable device name"
+UDEV_LINK_RULE=/etc/udev/rules.d/99-piproxy-serial.rules
+UDEV_LINK_CONTENT='# USB-serial bridges used by piproxy -> /dev/piproxy-link
+SUBSYSTEM=="tty", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="7523", SYMLINK+="piproxy-link"
+SUBSYSTEM=="tty", ATTRS{idVendor}=="10c4", ATTRS{idProduct}=="ea60", SYMLINK+="piproxy-link"
+SUBSYSTEM=="tty", ATTRS{idVendor}=="0403", SYMLINK+="piproxy-link"'
+
+if [ "$CHECK_ONLY" = 1 ]; then
+    if [ -f "$UDEV_LINK_RULE" ]; then ok "$UDEV_LINK_RULE exists"; else warn "would create $UDEV_LINK_RULE"; fi
+elif [ -f "$UDEV_LINK_RULE" ] && [ "$(cat "$UDEV_LINK_RULE")" = "$UDEV_LINK_CONTENT" ]; then
+    ok "$UDEV_LINK_RULE already up to date"
+else
+    echo "$UDEV_LINK_CONTENT" | sudo tee "$UDEV_LINK_RULE" >/dev/null
+    sudo udevadm control --reload-rules 2>/dev/null || true
+    sudo udevadm trigger --subsystem-match=tty 2>/dev/null || true
+    ok "wrote $UDEV_LINK_RULE"
+fi
+if [ -e /dev/piproxy-link ]; then
+    ok "/dev/piproxy-link -> $(readlink -f /dev/piproxy-link)"
+else
+    warn "/dev/piproxy-link not present (plug the ESP32 in, or replug it once)"
+fi
+
+# --- 5. configuration --------------------------------------------------------------
 
 step "Configuration"
 if [ -f "$DEFAULTS_PATH" ]; then
@@ -106,19 +136,19 @@ else
 # Where reports go:
 #   log     print only - no hardware needed, use this to bring the system up
 #   serial  UART to a Pro Micro that is the USB HID keyboard on the PC
-#           add: --serial-port /dev/ttyUSB0
+#           add: --serial-port /dev/piproxy-link
 #   hidg    this Pi is itself the USB keyboard (needs USB-C in peripheral mode,
 #           see setup-gadget.sh) - add: --hid-device /dev/hidg0
 PIPROXY_ARGS="--sink log"
 
 # Key held while a person covers the ROI centre. f13-f15 exist on no real
 # keyboard, so they can never collide with a key you actually press.
-#PIPROXY_ARGS="--sink serial --serial-port /dev/ttyUSB0 --trigger-key f13"
+#PIPROXY_ARGS="--sink serial --serial-port /dev/piproxy-link --trigger-key f13"
 EOF
     ok "created $DEFAULTS_PATH"
 fi
 
-# --- 5. systemd service ------------------------------------------------------------
+# --- 6. systemd service ------------------------------------------------------------
 
 step "systemd service"
 UNIT_CONTENT="[Unit]
@@ -156,7 +186,7 @@ else
     ok "wrote $UNIT_PATH"
 fi
 
-# --- 6. keyboards ------------------------------------------------------------------
+# --- 7. keyboards ------------------------------------------------------------------
 
 step "Keyboards visible right now"
 if python3 -c 'import evdev' 2>/dev/null; then
@@ -170,7 +200,7 @@ else
     warn "python3-evdev not importable yet; re-run after the install above"
 fi
 
-# --- 7. done -----------------------------------------------------------------------
+# --- 8. done -----------------------------------------------------------------------
 
 if [ "$CHECK_ONLY" = 1 ]; then
     step "Check complete (nothing was changed)"

@@ -12,6 +12,7 @@ does not care which sink is attached.
             USB-C port is free for peripheral mode - not the case on this server.
 """
 
+import os
 import sys
 import threading
 import time
@@ -59,66 +60,157 @@ class LogSink(Sink):
 
 
 class SerialSink(Sink):
-    """Sends reports over a UART to the Pro Micro.
+    """Sends reports over a UART to the Pro Micro, and survives the cable moving.
 
     Framing matters here in a way it did not for the old one-byte trigger link: a
     dropped byte would desynchronise every following report, so each one is wrapped
     in a start byte and a checksum and the receiver resynchronises on the next
     header it recognises.
+
+    Reconnection is not a nicety. Unplugging the USB bridge makes every write raise,
+    and Linux hands the device a *different* name when it comes back - ttyUSB0
+    becomes ttyUSB1 - so a sink pinned to one path stays broken even once the
+    hardware is back. Meanwhile the keyboard is still grabbed, so the user has no
+    keyboard at all and nothing says why.
     """
 
     name = "serial"
     START = 0xAB
+    RETRY_S = 1.0
 
     def __init__(self, port: str, baud: int = 115200):
-        import serial  # imported lazily so the log sink needs no pyserial
+        import serial  # noqa: F401 - imported here so the log sink needs no pyserial
 
-        # DTR and RTS must be deasserted BEFORE the port opens. On an ESP32 devkit
-        # those two lines drive the auto-reset circuit - RTS goes to EN - so opening
-        # the port the ordinary way asserts RTS and holds the chip in reset for as
-        # long as we have it open. The board then looks dead, and the symptom is a
-        # silent link rather than an error. Constructing the Serial without a port
-        # and opening it afterwards is the only way pyserial lets us set these first.
-        self.ser = serial.Serial()
-        self.ser.port = port
-        self.ser.baudrate = baud
-        self.ser.timeout = 0
-        # write_timeout=0 makes writes non-blocking. If the bridge ever stops
-        # draining, a blocking write would stall the thread that owns keyboard
-        # input - a serial hiccup must never become typing latency.
-        self.ser.write_timeout = 0
-        self.ser.dtr = False
-        self.ser.rts = False
-        self.ser.open()
-        self.ser.dtr = False
-        self.ser.rts = False
-        self.port = port
+        self.port_spec = port
         self.baud = baud
+        self.ser = None
+        self.port = None
         self.dropped = 0
+        self.reconnects = 0
+        self.last_error = None
         self._lock = threading.Lock()
+        self._next_retry = 0.0
+        if not self._open():
+            # Not fatal. At boot this service can easily start before USB has
+            # enumerated, and a sink that refuses to exist until the cable is
+            # perfect is worse than one that says so and keeps trying.
+            print(f"[sink:serial] {self.port_spec} not available yet "
+                  f"({self.last_error}); retrying every {self.RETRY_S:.0f}s",
+                  file=sys.stderr, flush=True)
+
+    def _resolve(self):
+        """The configured path, or any device of the same kind if it has moved."""
+        import glob as _glob
+
+        if os.path.exists(self.port_spec):
+            return self.port_spec
+        matches = sorted(_glob.glob(self.port_spec))
+        if matches:
+            return matches[0]
+        # The exact node is gone. Accept the same class of device under a new name,
+        # which is what a replug produces, rather than requiring a config edit.
+        for pattern in ("/dev/ttyUSB*", "/dev/ttyACM*"):
+            found = sorted(_glob.glob(pattern))
+            if found:
+                return found[0]
+        return None
+
+    def _open(self) -> bool:
+        import serial
+
+        path = self._resolve()
+        if path is None:
+            self.last_error = "no serial device present"
+            return False
+        try:
+            # DTR and RTS must be deasserted BEFORE the port opens. On an ESP32
+            # devkit those lines drive the auto-reset circuit - RTS goes to EN - so
+            # opening the port the ordinary way asserts RTS and holds the chip in
+            # reset for as long as we have it open. The board then looks dead, and
+            # the symptom is a silent link rather than an error. Constructing the
+            # Serial without a port and opening it after is the only way pyserial
+            # lets us set these first.
+            ser = serial.Serial()
+            ser.port = path
+            ser.baudrate = self.baud
+            ser.timeout = 0
+            # write_timeout=0 makes writes non-blocking. If the bridge ever stops
+            # draining, a blocking write would stall the thread that owns keyboard
+            # input - a serial hiccup must never become typing latency.
+            ser.write_timeout = 0
+            ser.dtr = False
+            ser.rts = False
+            ser.open()
+            ser.dtr = False
+            ser.rts = False
+        except Exception as exc:
+            self.last_error = str(exc)
+            return False
+        self.ser = ser
+        self.port = path
+        self.last_error = None
+        return True
+
+    def _drop_connection(self, exc) -> None:
+        self.last_error = str(exc)
+        if self.ser is not None:
+            try:
+                self.ser.close()
+            except Exception:
+                pass
+        self.ser = None
+        self._next_retry = time.monotonic() + self.RETRY_S
 
     def send(self, report: bytes) -> None:
         checksum = 0
         for b in report:
             checksum ^= b
         frame = bytes([self.START]) + report + bytes([checksum])
-        import serial
 
         with self._lock:
+            if self.ser is None:
+                if time.monotonic() < self._next_retry:
+                    self.dropped += 1
+                    return
+                self._next_retry = time.monotonic() + self.RETRY_S
+                if not self._open():
+                    self.dropped += 1
+                    return
+                self.reconnects += 1
+                print(f"[sink:serial] reconnected on {self.port}",
+                      file=sys.stderr, flush=True)
+
             try:
                 self.ser.write(frame)
-            except serial.SerialTimeoutException:
-                # Safe to drop: the Mac's keepalive means the current state is resent
-                # within 20ms, and the Pro Micro's own watchdog releases everything if
-                # the stream really has stopped.
+            except Exception as exc:
+                # Every failure lands here, not just timeouts. A timeout means a full
+                # buffer and is safe to drop - the state is resent within 20ms. An
+                # OSError means the device is gone, and the only useful response is
+                # to let go of it and start looking again. Distinguishing them buys
+                # nothing: neither may propagate, because this runs on the thread
+                # that is the sole path to the user's keyboard.
                 self.dropped += 1
+                if self.ser is not None and not getattr(self.ser, "is_open", False):
+                    self._drop_connection(exc)
+                elif isinstance(exc, OSError) or "Input/output" in str(exc):
+                    self._drop_connection(exc)
+                    print(f"[sink:serial] link lost ({exc}); will reconnect",
+                          file=sys.stderr, flush=True)
+
+    @property
+    def healthy(self) -> bool:
+        return self.ser is not None
 
     def close(self) -> None:
         try:
             self.send(bytes(8))
-            self.ser.close()
         except Exception:
             pass
+        if self.ser is not None:
+            try:
+                self.ser.close()
+            except Exception:
+                pass
 
 
 class HidGadgetSink(Sink):
@@ -192,10 +284,15 @@ class Emitter:
         self._wake = threading.Event()
         self._stop = threading.Event()
         self._last: Optional[bytes] = None
+        self.errors = 0
         self._thread = threading.Thread(target=self._loop, daemon=True, name="emitter")
 
     def start(self) -> None:
         self._thread.start()
+
+    @property
+    def alive(self) -> bool:
+        return self._thread.is_alive()
 
     def nudge(self) -> None:
         """Called after any state change to send without waiting for the keepalive."""
@@ -209,7 +306,19 @@ class Emitter:
             self._wake.clear()
             report = self.state.build()
             self._last = report
-            self.sink.send(report)
+            try:
+                self.sink.send(report)
+            except Exception as exc:
+                # This thread is the only route from a keypress to the PC. If it
+                # dies the process stays up, systemd still reports "active", and
+                # the keyboard stays grabbed - so the user loses their keyboard
+                # entirely, with nothing anywhere saying why. That happened once,
+                # to an OSError from a replugged USB bridge. No sink failure may
+                # ever end this loop again.
+                self.errors += 1
+                if self.errors in (1, 10) or self.errors % 500 == 0:
+                    print(f"[emitter] sink raised ({exc}); continuing "
+                          f"[{self.errors} so far]", file=sys.stderr, flush=True)
 
     def stop(self) -> None:
         """Release every key on the way out. A crash skips this, which is what the
