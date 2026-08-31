@@ -1,4 +1,4 @@
-"""How the Mac tells the Pi that a person is on the ROI's centre pixel.
+"""How the Mac tells the Pi that a car is on the ROI's centre pixel.
 
 Two doors, on purpose:
 

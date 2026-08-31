@@ -3,7 +3,7 @@
 The Windows PC must see **exactly one keyboard**. So the real keyboard stops being
 plugged into the PC: its Logitech receiver moves to the Raspberry Pi, the Pi forwards
 every keystroke onward, and the Pi injects one extra key into that same stream when
-the Mac's vision pipeline reports a person on the ROI's centre pixel.
+the Mac's vision pipeline reports a car on the ROI's centre pixel.
 
 ```
 Clavier ──2.4GHz──> Receiver ──USB-A──> Raspberry Pi ──sink──> Windows PC
@@ -201,7 +201,7 @@ and every hop became observable from one place — see
 | | |
 |---|---|
 | Whole chain, trigger → keypress | `KEY_K` down, held, up. The host's auto-repeat fires while held, which is what proves it is *held* and not re-typed |
-| Both sources merged | `a` held → `KEY_A`; person arrives → `KEY_K` joins it; `a` released → only `KEY_A` goes up |
+| Both sources merged | `a` held → `KEY_A`; car arrives → `KEY_K` joins it; `a` released → only `KEY_A` goes up |
 | Key sequence | `a`, `b`, `c` each down-then-up, in order |
 | Pi → ESP32 link, 2000 frames | **2000/2000 received, 0 checksum failures**, driven at 936 frames/s — 81% of the line's capacity and ~19× the operational rate |
 

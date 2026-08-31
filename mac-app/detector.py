@@ -3,10 +3,10 @@ from ultralytics import YOLO
 
 WEIGHTS_PATH = "yolov8n.pt"  # swap this one line for your own trained model later
 
-# Class indices to keep. 0 is "person" in COCO - filtering here (rather than after the
-# fact) means non-person detections are discarded inside NMS, so they never reach
-# result.plot() either.
-CLASSES = [0]
+# Class indices to keep. 2 is "car" in COCO - filtering here (rather than after the
+# fact) means non-car detections are discarded inside NMS, so they never reach
+# result.plot() either. Add 5 ("bus") and 7 ("truck") here if you want those too.
+CLASSES = [2]
 
 
 class Detector:

@@ -1,6 +1,6 @@
 """Mac -> trigger link.
 
-One state per update: "a person covers the ROI's centre pixel", or not. Two
+One state per update: "a car covers the ROI's centre pixel", or not. Two
 transports carry it, and the rest of this file is deliberately identical for both,
 because the protocol is the part that makes the link correct:
 

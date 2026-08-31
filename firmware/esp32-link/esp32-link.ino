@@ -1,6 +1,6 @@
 // ESP32 side of the trigger link. Plugged into the MacBook's USB.
 //
-// Reads one state byte per update from the Mac (0x01 = person on the ROI's centre pixel,
+// Reads one state byte per update from the Mac (0x01 = car on the ROI's centre pixel,
 // 0x00 = not) and mirrors it onto TRIGGER_PIN, which runs to the Pro Micro. Active high.
 //
 // See docs/TRIGGER.md for wiring and the reasoning behind the numbers here.

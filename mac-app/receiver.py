@@ -17,7 +17,7 @@ STATS_EVERY = 100    # print the stats line this often
 
 
 def center_is_covered(result, cx: int, cy: int) -> bool:
-    """The trigger rule: is the ROI's centre pixel inside any detected person's box?"""
+    """The trigger rule: is the ROI's centre pixel inside any detected car's box?"""
     boxes = result.boxes
     if boxes is None or len(boxes) == 0:
         return False

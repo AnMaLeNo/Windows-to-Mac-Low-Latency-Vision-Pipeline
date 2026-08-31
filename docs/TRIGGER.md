@@ -15,7 +15,7 @@ point, and it is a bare wire — nothing to parse, nothing to time out.
 
 ## The rule
 
-Per frame, on the Mac: **is the ROI's centre pixel inside any detected person's bounding
+Per frame, on the Mac: **is the ROI's centre pixel inside any detected car's bounding
 box?** Implemented in `center_is_covered()` in [`mac-app/receiver.py`](../mac-app/receiver.py) —
 a point-in-box test against `result.boxes.xyxy`, vectorised over all boxes.
 
