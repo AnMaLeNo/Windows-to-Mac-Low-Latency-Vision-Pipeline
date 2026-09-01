@@ -24,7 +24,7 @@ C++ (`windows-agent/src/protocol.h`):
 #pragma pack(push, 1)
 struct PacketHeader {
     uint32_t sequence;
-    uint64_t capture_ts_us;
+    uint64_t capture_wallclock_us;
     uint32_t capture_to_send_us;
     uint16_t width;
     uint16_t height;
@@ -34,7 +34,7 @@ struct PacketHeader {
 static_assert(sizeof(PacketHeader) == 24, "PacketHeader size drifted");
 ```
 
-Python (`mac-app/protocol.py`):
+Python (`mac-app/macvision/protocol.py`):
 
 ```python
 HEADER_FORMAT = "<IQIHHI"  # little-endian, standard sizes, zero padding - matches #pragma pack(1)
@@ -47,6 +47,19 @@ The debug overlay shows:
 
 - **`win`** — Windows-side capture → encode → send. One machine, one monotonic clock. Exact.
 - **`mac`** — Mac-side packet received → detection drawn. One machine, one monotonic clock. Exact.
+  Sampled after the boxes and the crosshair are drawn and *before* the overlay text, so it
+  excludes `imshow` and `waitKey`. With `--no-display` it collapses to the decision time,
+  and headless numbers are then not comparable to windowed ones.
+- **`decide`** — packet received → trigger byte written. Printed in the `[stats]` line
+  rather than the overlay, and unaffected by the display — so this is the figure to quote
+  when comparing runs.
+
+Everything above assumes the Windows agent is the source. A camera attached to the Mac
+has no second clock, so there is nothing to calibrate and `net+` is not reported; and it
+cannot know how long the photons took to become an array, so `win` becomes `cam` and is
+reported as unmeasured. The overlay then reads `e2e>` instead of `e2e~`: a lower bound by
+an unknown amount, rather than an understatement by a known one. The two are not
+comparable, and `decide` is the only figure that is.
 - **`net+`** — network delay *above the best case seen recently* (see below). Exact.
 - **`e2e~`** — the sum of the three. The tilde is deliberate: it understates true
   glass-to-glass by exactly the irreducible one-way network hop, which on this LAN is
@@ -63,8 +76,9 @@ accuracy, not milliseconds; it reports its own error bound in `w32tm /query /sta
 `Root Dispersion` (8s here). It also *slews* rather than steps offsets of this size, so
 `w32tm /resync` does not promptly correct it.
 
-So the receiver self-calibrates instead. Queueing delay varies frame to frame and
-occasionally clears; a clock offset is constant. Therefore over a rolling window of frames:
+So the receiver self-calibrates instead, in
+[`mac-app/macvision/stats.py`](../mac-app/macvision/stats.py). Queueing delay varies
+frame to frame and occasionally clears; a clock offset is constant. Therefore over a rolling window of frames:
 
 ```
 min(transit)  ~=  clock_offset + best-case network hop

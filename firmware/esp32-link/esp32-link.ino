@@ -7,7 +7,7 @@
 
 static const int      TRIGGER_PIN  = 4;       // safe GPIO: not a strapping pin, not on the flash bus
 static const int      LED_PIN      = 2;       // onboard LED on most ESP32 devkits; -1 to disable
-static const uint32_t BAUD         = 115200;  // must match BAUD in mac-app/trigger.py
+static const uint32_t BAUD         = 115200;  // must match BAUD in mac-app/macvision/trigger.py
 static const uint32_t WATCHDOG_MS  = 250;
 
 static bool     active        = false;

@@ -3,8 +3,8 @@
 Two doors, on purpose:
 
 UDP (the hot path). One byte, 0x01 = active / 0x00 = idle - byte-for-byte the same
-protocol the ESP32 serial link already spoke, so mac-app/trigger.py keeps its logic
-and only swaps its transport. Fire-and-forget suits a stream that is re-sent 50x a
+protocol the ESP32 serial link already spoke, so mac-app/macvision/trigger.py keeps
+its logic and only swaps its transport. Fire-and-forget suits a stream that is re-sent 50x a
 second: there is nothing to retransmit, because a newer state is always 20ms away.
 
 HTTP (control and inspection). Same trigger reachable with curl, plus /status and

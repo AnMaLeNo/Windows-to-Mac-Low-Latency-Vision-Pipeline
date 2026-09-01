@@ -147,11 +147,11 @@ Two doors, on purpose.
 
 **UDP, port 48010 — the hot path.** One byte: `0x01` active, `0x00` idle. This is
 byte-for-byte the protocol the ESP32 link already spoke, so
-[`mac-app/trigger.py`](../mac-app/trigger.py) kept its logic and swapped only its
+[`mac-app/macvision/trigger.py`](../mac-app/macvision/trigger.py) kept its logic and swapped only its
 transport:
 
 ```bash
-TRIGGER_TARGET=udp://raspberrypi.local:48010 python3 receiver.py
+TRIGGER_TARGET=udp://raspberrypi.local:48010 python3 -m macvision
 ```
 
 There is no "on change only" optimisation, and no retransmission. The Mac sends the
