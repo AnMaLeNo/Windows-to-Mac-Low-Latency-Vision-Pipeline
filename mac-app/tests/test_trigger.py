@@ -370,6 +370,125 @@ def run():
         failures.append("SerialTransport.send() opens the port inline; a device open "
                         "would stall the frame loop inside Trigger._lock")
 
+    # And it must not call pyserial's write(). On the POSIX backend write_timeout=0 is
+    # read as "non-blocking", and serialposix then busy-loops on EAGAIN with no exit -
+    # so a full tx buffer spins forever holding Trigger._lock, which the frame loop
+    # takes on its own thread. Reproduced on a pty: the loop wedged, the keepalive
+    # stopped re-asserting, and stop() could not write its release byte.
+    if ".write(" in send_src and "os.write" not in send_src:
+        failures.append("SerialTransport.send() uses pyserial's write(); it busy-loops "
+                        "forever on a full buffer. Write the fd directly.")
+    if "BlockingIOError" not in send_src:
+        failures.append("SerialTransport.send() does not handle BlockingIOError, which "
+                        "is what a full tx buffer raises on a non-blocking fd")
+
+    # A full buffer must not be logged per event: it fires on every write for as long
+    # as it lasts, and per-event logging buried stderr in half a million lines.
+    if "self.dropped % 500" in send_src and "buffer_full" not in send_src:
+        failures.append("a full tx buffer is logged on the error cadence; it needs its "
+                        "own transition-only reporting")
+
+    # --- the serial transport, driven over a pty ------------------------------------
+    # The only tests here that need pyserial, and they need it because the two bugs
+    # below are in the interaction with the library rather than in our own logic.
+    try:
+        import pty
+        import serial
+    except ImportError:
+        print("skip: pyserial or pty unavailable; the serial transport is unchecked")
+    else:
+        # A pty has no modem lines, so DTR/RTS raise ENOTTY. On a real port these
+        # setters simply succeed, and deasserting them before open is what keeps an
+        # ESP32 out of reset.
+        real_dtr, real_rts = serial.Serial.dtr, serial.Serial.rts
+        serial.Serial.dtr = property(lambda self: False, lambda self, v: None)
+        serial.Serial.rts = property(lambda self: False, lambda self, v: None)
+        try:
+            # 1. A full tx buffer must not hang the caller. pyserial's own write()
+            #    busy-loops forever here; nothing may block inside Trigger._lock.
+            master, slave = pty.openpty()
+            transport = tr.SerialTransport(os.ttyname(slave))
+            trig = Trigger(transport, keepalive_s=10)
+            trig.start()
+            # The fill runs on a DAEMON thread and is joined with a timeout, because
+            # the bug being tested for is an infinite loop inside update(): a plain
+            # loop here would hang the whole suite instead of failing it. A stuck
+            # daemon thread cannot stop the process from exiting.
+            filled = threading.Event()
+            def fill():
+                deadline = time.monotonic() + 3.0
+                wrote = 0
+                while time.monotonic() < deadline and transport.buffer_full == 0:
+                    trig.update(wrote % 2 == 0)
+                    wrote += 1
+                filled.set()
+
+            with redirect_stderr(io.StringIO()):
+                threading.Thread(target=fill, daemon=True).start()
+                if not filled.wait(8.0):
+                    failures.append("update() never returned with the tx buffer full - "
+                                    "pyserial's write() busy-loops on EAGAIN and this "
+                                    "wedges the frame loop inside Trigger._lock")
+                elif transport.buffer_full == 0:
+                    failures.append("could not fill the pty buffer; the rest of this "
+                                    "check did not run")
+                else:
+                    check("a full buffer is counted, not raised",
+                          transport.dropped > 0, True)
+                    check("and the port is not torn down for being busy",
+                          transport.healthy, True)
+                stopped = threading.Event()
+                threading.Thread(target=lambda: (trig.stop(), stopped.set()),
+                                 daemon=True).start()
+                check("stop() returns even with the buffer full", stopped.wait(3.0), True)
+            # The release must be the last byte on the wire even then: close() flushes
+            # the stale queue first, so a far end reading later cannot see a held key.
+            os.set_blocking(master, False)
+            drained = b""
+            try:
+                while True:
+                    chunk = os.read(master, 65536)
+                    if not chunk:
+                        break
+                    drained += chunk
+            except (BlockingIOError, OSError):
+                pass
+            check("the release is the last byte on the wire", drained[-1:], b"\x00")
+            os.close(master)
+
+            # 2. close() racing an in-flight reconnect must not leave the port held.
+            master2, slave2 = pty.openpty()
+            t2 = tr.SerialTransport(os.ttyname(slave2))
+            t2.RETRY_S = 0.05
+            handles = []
+            real_open, in_open = t2._open, threading.Event()
+
+            def slow_open():
+                in_open.set()
+                time.sleep(0.4)          # a re-enumerating bridge can exceed 500ms
+                ok = real_open()
+                if ok:
+                    handles.append(t2.ser)
+                return ok
+
+            t2._open = slow_open
+            with redirect_stderr(io.StringIO()):
+                t2._drop_connection(OSError("unplugged"))
+                t2.send(True)                 # arms the reconnect thread
+                in_open.wait(2.0)
+                t2.close()                    # Ctrl-C lands mid-open
+                time.sleep(0.8)
+            check("close() leaves no handle behind", t2.ser, None)
+            if handles:
+                check("a handle opened during close() is closed again",
+                      handles[0].is_open, False)
+            if t2._reconnect_thread is not None:
+                check("the reconnect thread stopped",
+                      t2._reconnect_thread.is_alive(), False)
+            os.close(master2)
+        finally:
+            serial.Serial.dtr, serial.Serial.rts = real_dtr, real_rts
+
     for mod in ("cv2", "numpy", "torch", "ultralytics", "serial"):
         if mod in AT_IMPORT:
             failures.append(f"importing macvision.trigger pulled in {mod}")

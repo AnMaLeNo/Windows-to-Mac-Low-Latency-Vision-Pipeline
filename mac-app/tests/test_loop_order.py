@@ -228,6 +228,32 @@ def run_tests():
     if hasattr(r["trigger"], "stopped"):
         failures.append("run() called stop() - main()'s finally block owns that")
 
+    # --- argument guards, verified through the real parser ---------------------------
+    # Each of these used to reach the frame loop and crash or spin there, after the
+    # trigger link was already open. They are refused at parse time now.
+    from macvision.__main__ import parse_args
+    for argv, flag in ((["--stats-every", "0"], "--stats-every"),
+                       (["--stats-window", "0"], "--stats-window"),
+                       (["--keepalive-ms", "0"], "--keepalive-ms"),
+                       (["--roi-w", "0"], "--roi-w"),
+                       (["--udp-port", "99999"], "--udp-port")):
+        try:
+            with redirect_stderr(io.StringIO()):
+                parse_args(argv)
+        except SystemExit as exc:
+            if exc.code != 2:
+                failures.append(f"{flag} exited {exc.code}, expected argparse's 2")
+        else:
+            failures.append(f"{flag} 0 was accepted; it crashes or spins in the loop")
+    # A valid combination must still parse.
+    try:
+        with redirect_stderr(io.StringIO()):
+            args = parse_args(["--stats-every", "1", "--stats-window", "1",
+                               "--keepalive-ms", "0.5"])
+        check("a valid keepalive survives", args.keepalive_ms, 0.5)
+    except SystemExit:
+        failures.append("a valid argument combination was rejected")
+
     for mod in ("cv2", "numpy", "torch", "ultralytics"):
         if mod in sys.modules:
             failures.append(f"importing macvision.loop pulled in {mod}")

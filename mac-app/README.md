@@ -174,6 +174,12 @@ Wiring and the reasoning behind the numbers are in
   holds, and `CAP_PROP_BUFFERSIZE=1` is not honoured by AVFoundation. The camera source
   therefore reads on its own thread and keeps only the newest, counting the rest into
   `stale dropped` — the same trade the UDP drain makes.
+- **A serial link that stops draining is survivable, but not silent.** If the ESP32's
+  bridge wedges, the kernel tx buffer fills and every write is dropped rather than
+  queued — the trigger state is level-triggered, so the next one that gets through is
+  correct. One line says the buffer filled and one says it drained; `buffer_full` in
+  the status counts them. On shutdown the queue is flushed before the release byte is
+  written, so a far end reading the backlog later cannot see a held key.
 - **A dead Windows agent can leave the key held.** If the sender dies while a person is
   on the centre pixel, this Mac blocks in `recvfrom` forever while the keepalive keeps
   asserting the last state — so the far end's watchdog is fed and never fires. Ctrl-C

@@ -129,7 +129,8 @@ class Transport:
 
     def status(self):
         return {"kind": self.name, "description": self.description,
-                "connected": self.healthy, "dropped": getattr(self, "dropped", 0)}
+                "connected": self.healthy, "dropped": getattr(self, "dropped", 0),
+                "buffer_full": getattr(self, "buffer_full", 0)}
 
 
 class NullTransport(Transport):
@@ -158,7 +159,10 @@ class SerialTransport(Transport):
         self.baud = baud
         self.description = f"serial {port} @ {baud}"
         self.ser = None
+        self._fd = None
         self.dropped = 0
+        self.buffer_full = 0
+        self._buffer_full = False
         self.reconnects = 0
         self.last_error = None
         self._lock = threading.Lock()
@@ -181,10 +185,18 @@ class SerialTransport(Transport):
             ser.port = self.port
             ser.baudrate = self.baud
             ser.timeout = 0
-            # write_timeout=0 makes writes non-blocking. If the ESP32 ever stops draining
-            # its input the kernel's tx buffer fills up, and a blocking write would stall
-            # the detection loop itself - a serial hiccup must never become vision
-            # latency.
+            # write_timeout=0 does NOT do what it looks like it does, and this comment
+            # used to claim it did. On the POSIX backend pyserial reads it as
+            # "non-blocking", and serialposix.Serial.write() then loops on os.write
+            # swallowing EAGAIN with no exit: a full tx buffer makes write() spin
+            # forever instead of raising SerialTimeoutException. Reproduced on a pty
+            # whose master was never drained - 20000 bytes, then a hang at
+            # serialposix.py:621 that only SIGKILL ended.
+            #
+            # It is still set, because it is what puts the fd in O_NONBLOCK, which is
+            # what makes the os.write() in send() below return EAGAIN instead of
+            # blocking. The non-blocking guarantee comes from that direct write, not
+            # from this line.
             ser.write_timeout = 0
             ser.dtr = False
             ser.rts = False
@@ -194,7 +206,20 @@ class SerialTransport(Transport):
         except Exception as exc:
             self.last_error = str(exc)
             return False
+        fd = getattr(ser, "fd", None)
+        if fd is None:
+            # Only the POSIX backend exposes a raw fd, and it is the only one this
+            # project runs on. Refuse rather than silently falling back to the write
+            # that can spin.
+            try:
+                ser.close()
+            except Exception:
+                pass
+            self.last_error = ("this pyserial backend exposes no raw fd; "
+                               "macvision needs the POSIX one")
+            return False
         self.ser = ser
+        self._fd = fd
         self.last_error = None
         return True
 
@@ -206,6 +231,7 @@ class SerialTransport(Transport):
             except Exception:
                 pass
         self.ser = None
+        self._fd = None
 
     def _reconnect_loop(self):
         """Reopens the port on a thread of its own, and nowhere else.
@@ -226,6 +252,19 @@ class SerialTransport(Transport):
             if self.ser is not None:
                 continue
             if self._open():
+                if self._stop.is_set():
+                    # close() ran while we were inside the open. Whoever closed us has
+                    # already looked at self.ser and moved on, so this handle would be
+                    # held by a dying process and the next run would fail with
+                    # "Resource busy". Hand it back immediately.
+                    with self._lock:
+                        try:
+                            self.ser.close()
+                        except Exception:
+                            pass
+                        self.ser = None
+                        self._fd = None
+                    return
                 self.reconnects += 1
                 print(f"[trigger:serial] reconnected on {self.port}",
                       file=sys.stderr, flush=True)
@@ -249,8 +288,36 @@ class SerialTransport(Transport):
                 self._start_reconnecting()
                 return self._fail(None)
             try:
-                self.ser.write(b"\x01" if active else b"\x00")
+                # os.write on the raw fd, NOT self.ser.write(). pyserial's POSIX write
+                # busy-loops forever on a full buffer (see the write_timeout comment in
+                # _open) - and it would do it while holding this lock AND Trigger._lock,
+                # which the frame loop takes on its own thread. That is the exact thing
+                # the Transport docstring promises can never happen: inference stops,
+                # the keepalive can no longer re-assert the state so the far end's
+                # watchdog drops the key anyway, and stop() cannot write its release
+                # byte. The fd is already O_NONBLOCK, so this raises BlockingIOError
+                # instead, which is a drop we count and resend 20ms later.
+                os.write(self._fd, b"\x01" if active else b"\x00")
+                if self._buffer_full:
+                    self._buffer_full = False
+                    print(f"[trigger:serial] {self.port} tx buffer drained; writing "
+                          f"again [{self.buffer_full} dropped]",
+                          file=sys.stderr, flush=True)
                 return True
+            except BlockingIOError:
+                # The tx buffer is full. Safe to drop: the state is level-triggered and
+                # goes out again on the next keepalive. Not a reason to tear down a port
+                # that is merely busy, and not a reason to say anything more than once -
+                # this fires on every write for as long as it lasts, so logging per
+                # event buries the machine in stderr (536,000 lines in a 3s repro).
+                # Report the two transitions instead, and keep the count in status().
+                self.dropped += 1
+                self.buffer_full += 1
+                if not self._buffer_full:
+                    self._buffer_full = True
+                    print(f"[trigger:serial] {self.port} tx buffer full; dropping "
+                          f"writes until it drains", file=sys.stderr, flush=True)
+                return False
             except Exception as exc:
                 # Every failure lands here, not just timeouts. A timeout means a full
                 # buffer and is safe to drop - the state is resent within 20ms. An
@@ -281,12 +348,31 @@ class SerialTransport(Transport):
     def close(self):
         self._stop.set()
         if self._reconnect_thread is not None:
-            self._reconnect_thread.join(timeout=0.5)
-        if self.ser is not None:
-            try:
-                self.ser.close()
-            except Exception:
-                pass
+            # RETRY_S long, so a thread parked inside a real device open can outlive
+            # this join. The re-check below is what stops it leaving a handle behind.
+            self._reconnect_thread.join(timeout=self.RETRY_S + 0.5)
+        with self._lock:
+            if self.ser is not None:
+                try:
+                    # Discard whatever is still queued before writing the release.
+                    # Trigger.stop() already sent it, but if the buffer was full that
+                    # write was dropped - and the stale backlog still ends in whatever
+                    # the state was, so a far end reading it later would see the key
+                    # held by a process that has exited. Flushing makes the release
+                    # provably the last byte queued even on a wedged link.
+                    self.ser.reset_output_buffer()
+                except Exception:
+                    pass
+                try:
+                    os.write(self._fd, b"\x00")
+                except Exception:
+                    pass
+                try:
+                    self.ser.close()
+                except Exception:
+                    pass
+                self.ser = None
+                self._fd = None
 
 
 class UdpTransport(Transport):

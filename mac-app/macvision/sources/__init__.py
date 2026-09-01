@@ -21,6 +21,29 @@ from urllib.parse import parse_qs, urlparse
 DEFAULT_KIND = "udp"
 
 
+def _int(text):
+    """int(text), or None. Convert and catch - never str.isdigit() as a proxy.
+
+    isdigit() is True for characters int() refuses: "2".isdigit() and "\u00b2".isdigit()
+    are both True, but int("\u00b2") raises ValueError. Every unicode digit-like
+    character is such a hole, and so is a leading "--". Trusting isdigit() is what let
+    five hostile values raise out of parse_source, whose whole contract is that it
+    cannot.
+    """
+    try:
+        return int(text.strip(), 10)
+    except (ValueError, AttributeError):
+        return None
+
+
+def _float(text):
+    """float(text), or None. Same reasoning as _int."""
+    try:
+        return float(text.strip())
+    except (ValueError, AttributeError):
+        return None
+
+
 class Capture:
     """One frame, and everything the loop needs to reason about it.
 
@@ -172,7 +195,9 @@ def parse_source(target):
         out["kind"] = "unknown"
         out["reason"] = "camera:// names no device (try camera://0)"
         return out
-    out["device"] = int(device) if device.isdigit() else device
+    # A bare index becomes an int; anything else is a device path, left as typed.
+    index = _int(device)
+    out["device"] = index if index is not None and device.strip().isdigit() else device
 
     query = parse_qs(parsed.query)
 
@@ -182,29 +207,35 @@ def parse_source(target):
 
     crop = one("crop")
     if crop:
-        parts = crop.split(",")
-        if len(parts) != 4 or not all(p.strip().lstrip("-").isdigit() for p in parts):
+        parts = [_int(p) for p in crop.split(",")]
+        if len(parts) != 4 or any(p is None for p in parts):
             out["reason"] = f"crop={crop!r}: expected four integers x,y,w,h"
             out["kind"] = "unknown"
             return out
-        out["crop"] = tuple(int(p) for p in parts)
+        if parts[2] <= 0 or parts[3] <= 0:
+            out["reason"] = f"crop={crop!r}: width and height must be positive"
+            out["kind"] = "unknown"
+            return out
+        out["crop"] = tuple(parts)
 
     size = one("size")
     if size:
-        parts = size.lower().split("x")
-        if len(parts) != 2 or not all(p.strip().isdigit() for p in parts):
-            out["reason"] = f"size={size!r}: expected WxH, e.g. 1280x720"
+        parts = [_int(p) for p in size.lower().split("x")]
+        if len(parts) != 2 or any(p is None or p <= 0 for p in parts):
+            out["reason"] = (f"size={size!r}: expected WxH of positive integers, "
+                             f"e.g. 1280x720")
             out["kind"] = "unknown"
             return out
-        out["size"] = (int(parts[0]), int(parts[1]))
+        out["size"] = tuple(parts)
 
     fps = one("fps")
     if fps:
-        if not fps.replace(".", "", 1).isdigit():
-            out["reason"] = f"fps={fps!r}: expected a number"
+        value = _float(fps)
+        if value is None or value <= 0:
+            out["reason"] = f"fps={fps!r}: expected a positive number"
             out["kind"] = "unknown"
             return out
-        out["fps"] = float(fps)
+        out["fps"] = value
 
     return out
 

@@ -123,7 +123,28 @@ def parse_args(argv=None):
                    help="probe camera indices and exit. Slow, and it blinks each "
                         "camera's activity light - there is no way to enumerate "
                         "AVFoundation devices through opencv without opening them")
-    return p.parse_args(argv)
+    args = p.parse_args(argv)
+
+    # Validated here rather than trusted, because each of these reaches a place with no
+    # guard of its own and turns into a crash or a spin mid-run - after the trigger link
+    # is open, which is the worst moment to discover a typo:
+    #   --stats-every 0   -> ZeroDivisionError on the first frame (frames % 0)
+    #   --stats-window 0  -> deque(maxlen=0), then min() of an empty sequence
+    #   --keepalive-ms 0  -> Event.wait(0) returns instantly, so the keepalive becomes a
+    #                        ~500,000/s spin holding the lock the frame loop needs
+    for flag, value, low in (("--stats-every", args.stats_every, 1),
+                             ("--stats-window", args.stats_window, 1),
+                             ("--roi-w", args.roi_w, 1),
+                             ("--roi-h", args.roi_h, 1),
+                             ("--baud", args.baud, 1)):
+        if value < low:
+            p.error(f"{flag} must be at least {low} (got {value})")
+    if args.keepalive_ms <= 0:
+        p.error(f"--keepalive-ms must be greater than 0 (got {args.keepalive_ms}). "
+                f"It is a period, not a rate: 0 would spin instead of pausing.")
+    if not 0 <= args.udp_port <= 65535:
+        p.error(f"--udp-port must be between 0 and 65535 (got {args.udp_port})")
+    return args
 
 
 def _raise_interrupt(*_):
@@ -178,7 +199,16 @@ def main(argv=None):
 
     # 2. The source. Opened here, not last, because it is the only thing that knows the
     #    frame geometry - and step 5's flush() is what keeps that safe.
-    spec = parse_source(args.source)
+    try:
+        spec = parse_source(args.source)
+    except Exception as exc:
+        # parse_source is documented as never raising, and its tests assert it. Belt and
+        # braces at the boundary: a traceback here would skip the teardown below and
+        # leave the trigger link open.
+        print(f"error: --source {args.source!r} could not be parsed ({exc})",
+              file=sys.stderr)
+        trigger.stop()
+        return 2
     if spec["kind"] == "unknown":
         print(f"error: --source {args.source!r}: {spec['reason']}\n"
               f"Expected udp://[host][:port] or camera://<index>[?crop=x,y,w,h].",

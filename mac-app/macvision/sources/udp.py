@@ -94,8 +94,15 @@ class UdpSource(Source):
         self.stale_dropped = 0
         self.malformed = 0
         self.decode_failures = 0
+        self.flushed = 0
         self.last_peer = None
         self._last_datagram = 0.0
+        # Drops from ticks the tracker never saw: a drain that ended on a runt, or a
+        # flush. They belong to the NEXT gap calculation, because "missing minus dropped
+        # here" is what separates "inference is slower than capture" from "the link is
+        # losing packets". Discarding them silently donates every one to lost_in_transit
+        # and sends the operator to check a cable that is fine.
+        self._unattributed_drops = 0
 
     def open(self):
         if self._decoder is None:
@@ -136,6 +143,12 @@ class UdpSource(Source):
                     break
         finally:
             self._sock.setblocking(True)
+        # Counted separately from stale_dropped on purpose. stale_dropped is the number
+        # people read to answer "is my Mac slower than the sender?", and a one-time
+        # startup discard is not evidence of that. But the tracker still has to hear
+        # about these, or the first gap after a flush blames the wire for them.
+        self.flushed += discarded
+        self._unattributed_drops += discarded
         return discarded
 
     def recv(self):
@@ -188,6 +201,9 @@ class UdpSource(Source):
                 print(f"[udp] {len(data)}-byte datagram is shorter than the 24-byte "
                       f"header; not ours? [{self.malformed} so far]",
                       file=sys.stderr, flush=True)
+            # These drops were real, and the tracker has not been told about them.
+            # Carry them to the next well-formed datagram rather than losing them.
+            self._unattributed_drops += dropped
             return Capture(None, t0, self.tracker.last_seq, 0, 0, dropped=dropped)
 
         (seq, capture_wallclock_us, capture_to_send_us,
@@ -196,7 +212,8 @@ class UdpSource(Source):
         # Before the decode, because last_seq is assigned inside observe() on every
         # path: a frame that then fails to decode must not make the next one report a
         # phantom gap.
-        note = self.tracker.observe(seq, dropped)
+        note = self.tracker.observe(seq, dropped + self._unattributed_drops)
+        self._unattributed_drops = 0
 
         jpeg_bytes = payload(data, jpeg_size)
         frame = self._decoder.decode(jpeg_bytes)
@@ -229,7 +246,8 @@ class UdpSource(Source):
     def status(self):
         st = {"kind": self.name, "description": self.description,
               "udp_port": self.port, "packets": self.packets,
-              "stale_dropped": self.stale_dropped, "malformed": self.malformed,
+              "stale_dropped": self.stale_dropped, "flushed": self.flushed,
+              "malformed": self.malformed,
               "decode_failures": self.decode_failures, "last_peer": self.last_peer,
               "idle_s": round(self.idle_s, 3)}
         st.update(self.tracker.status())

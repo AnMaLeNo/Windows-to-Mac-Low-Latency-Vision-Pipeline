@@ -57,7 +57,10 @@ class FakeCam:
         self.n += 1
         if self.ok_frames is not None and self.n > self.ok_frames:
             return False, None
-        return True, _Frame(self.h, self.w)
+        # Stamped with the read number: without an identity, "the reader kept only the
+        # newest" cannot be asserted, only the drop COUNTER can - and a reader that
+        # latched the first frame forever would still move that counter.
+        return True, _Frame(self.h, self.w, n=self.n)
 
     def set(self, *a):
         return True
@@ -69,13 +72,21 @@ class FakeCam:
 class _Frame:
     """A stand-in for an ndarray: only .shape and slicing are ever used."""
 
-    def __init__(self, h, w, y=0, x=0):
+    def __init__(self, h, w, y=0, x=0, n=0):
         self.shape = (h, w, 3)
         self._origin = (y, x)
+        self.n = n
 
     def __getitem__(self, key):
         ys, xs = key
-        return _Frame(ys.stop - ys.start, xs.stop - xs.start, ys.start, xs.start)
+        return _Frame(ys.stop - ys.start, xs.stop - xs.start, ys.start, xs.start,
+                      n=self.n)
+
+
+def cm_timeout():
+    """The camera's stall timeout, read live so a test cannot drift from the module."""
+    import macvision.sources.camera as cm
+    return cm.READ_TIMEOUT_S
 
 
 def datagram(seq, body=b"\xff\xd8jpeg", w=300, h=300, win_us=1500, age_us=5000):
@@ -261,7 +272,10 @@ def run():
         check("a camera cannot measure its upstream delay", cap.upstream_ms, None)
         check("and has no second clock to calibrate", cap.transit_ms, None)
 
-        # The reader thread must keep only the newest while the loop is busy.
+        # The reader must keep only the NEWEST frame while the loop is busy. Asserting
+        # the drop counter alone is not enough: a reader that latched the first frame
+        # and discarded every later one would move that counter identically while
+        # handing the detector a quarter-second-old image.
         before = c.stale_dropped
         time.sleep(0.2)
         cap = c.recv()
@@ -270,6 +284,30 @@ def run():
                             f"after a 200ms stall")
         if c.stale_dropped <= before:
             failures.append("stale_dropped did not accumulate")
+        if cap.frame.n < cam.n - 1:
+            failures.append(f"recv() returned frame {cap.frame.n} while the camera had "
+                            f"read {cam.n} - the reader is handing back a stale frame, "
+                            f"not the newest")
+        # And t0 belongs to that frame, not to the start of the stall.
+        age_ms = (time.perf_counter() - cap.t0) * 1000
+        if age_ms > 50:
+            failures.append(f"the returned frame's t0 is {age_ms:.0f}ms old; it should "
+                            f"be one frame period, not the length of the stall")
+
+        # The Condition handshake itself: recv() must be woken by notify(), not by the
+        # READ_TIMEOUT_S fallback. Dropping the notify() leaves every recv() waiting the
+        # full timeout - 2 seconds per frame - and no counter moves, so nothing else
+        # here would notice.
+        c.recv()                       # drain whatever is pending
+        t = time.perf_counter()
+        cap = c.recv()                 # must block only until the next read completes
+        waited = time.perf_counter() - t
+        if cap.frame is None:
+            failures.append("recv() timed out waiting for a frame from a live camera")
+        elif waited > 0.5 * cm_timeout():
+            failures.append(f"recv() waited {waited:.2f}s for the next frame; it fell "
+                            f"through to the READ_TIMEOUT_S fallback instead of being "
+                            f"woken by notify()")
 
         time.sleep(0.1)
         if c.flush() < 1:
@@ -332,6 +370,72 @@ def run():
     for attr in Capture.__slots__:
         if not hasattr(cap, attr):
             failures.append(f"Capture has no {attr}")
+
+    # --- regressions the adversarial review caught -----------------------------------
+    # parse_source is documented as never raising, and isdigit() was not a safe proxy
+    # for parseability: "\u00b2".isdigit() is True but int("\u00b2") raises. Five
+    # hostile values escaped as tracebacks out of a function whose contract forbids it.
+    hostile = ["camera://\u00b2", "camera://0?crop=--5,0,10,10", "camera://0?fps=\u00b2",
+               "camera://0?size=\u00b2x2", "camera://0?crop=1,2,3,\u00b2",
+               "camera://0?fps=1.2.3", "camera://0?size=1x1x1", "udp://h:\u00b2"]
+    for raw in hostile:
+        try:
+            spec = parse_source(raw)
+        except Exception as exc:
+            failures.append(f"parse_source({raw!r}) raised {exc!r}; it is documented as "
+                            f"never raising")
+            continue
+        if (spec["reason"] is not None) != (spec["kind"] == "unknown"):
+            failures.append(f"parse_source({raw!r}): reason and kind disagree")
+
+    # A crop or a size of zero would hand the detector an empty frame; fps=0 would ask
+    # the driver for an impossible rate. Refused at parse time, where the message can
+    # still name the flag.
+    for raw in ("camera://0?crop=1,2,0,4", "camera://0?crop=1,2,3,-1",
+                "camera://0?size=0x100", "camera://0?fps=0", "camera://0?fps=-5"):
+        check(f"parse_source({raw!r}) refuses it", parse_source(raw)["kind"], "unknown")
+
+    # Drops from a tick the tracker never saw must reach the NEXT gap calculation.
+    # Losing them donates every one to lost_in_transit, which tells the operator the
+    # link is dropping packets when the truth is the opposite diagnosis.
+    s2 = UdpSource(host="127.0.0.1", port=0, decoder=FakeDecoder())
+    s2.open()
+    tx2 = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        tx2.sendto(datagram(1), ("127.0.0.1", s2.port))
+        time.sleep(0.05)
+        s2.recv()
+        for seq in (2, 3, 4):
+            tx2.sendto(datagram(seq), ("127.0.0.1", s2.port))
+        tx2.sendto(b"runt", ("127.0.0.1", s2.port))   # the drain ends on a runt
+        time.sleep(0.05)
+        cap = s2.recv()
+        check("the runt tick still reports its drops", cap.dropped, 3)
+        tx2.sendto(datagram(5), ("127.0.0.1", s2.port))
+        time.sleep(0.05)
+        cap = s2.recv()
+        check("and they are attributed to staleness, not the wire", cap.note,
+              "[gap] 3 missing (seq 2..4): 3 dropped here for staleness, "
+              "0 lost in transit")
+        check("so nothing is blamed on the link", s2.tracker.lost_in_transit, 0)
+
+        # flush() has the same duty, and must not inflate stale_dropped - a one-time
+        # startup discard is not evidence that this Mac is too slow.
+        before = s2.stale_dropped
+        for seq in (6, 7, 8):
+            tx2.sendto(datagram(seq), ("127.0.0.1", s2.port))
+        time.sleep(0.05)
+        check("flush reports what it discarded", s2.flush(), 3)
+        check("and does not count them as staleness", s2.stale_dropped, before)
+        check("but does count them somewhere", s2.flushed, 3)
+        tx2.sendto(datagram(9), ("127.0.0.1", s2.port))
+        time.sleep(0.05)
+        cap = s2.recv()
+        check("a flush does not become phantom packet loss",
+              s2.tracker.lost_in_transit, 0)
+    finally:
+        tx2.close()
+        s2.close()
 
     for mod in ("cv2", "numpy", "torch", "ultralytics"):
         if mod in AT_IMPORT:
