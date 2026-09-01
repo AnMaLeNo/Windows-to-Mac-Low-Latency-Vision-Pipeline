@@ -109,7 +109,7 @@ class KeyState:
             modifiers = self._modifiers
             held = self._physical | self._trigger
             # Walk _order for a stable slot assignment, then let the trigger jump the
-            # queue if we are at capacity: a person crossing the ROI must still register
+            # queue if we are at capacity: a car crossing the ROI must still register
             # even while six keys are already held down.
             ordered = [u for u in self._order if u in held]
             trigger = self._trigger

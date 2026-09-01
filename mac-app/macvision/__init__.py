@@ -2,7 +2,7 @@
 
 The Windows PC captures a small fixed region of its screen, JPEG-encodes it and sends
 it over UDP. This package decodes those frames, asks one question of each - does a
-person cover the ROI's centre pixel? - and pushes one byte of state to whatever holds
+car cover the ROI's centre pixel? - and pushes one byte of state to whatever holds
 the key down on the PC: an ESP32 over USB serial, or a Raspberry Pi keyboard proxy
 over UDP.
 

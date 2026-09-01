@@ -1,4 +1,4 @@
-"""The trigger rule: is a person on the ROI's centre pixel?
+"""The trigger rule: is a car on the ROI's centre pixel?
 
 This is the whole product in fifteen lines. docs/TRIGGER.md calls center_is_covered()
 "the rule", so the name is a documented contract.
@@ -29,10 +29,11 @@ def center_is_covered(boxes, cx, cy):
     Three preconditions that were invisible while this lived inside the receive loop,
     written down because docs/TRIGGER.md describes all three as part of "the rule":
 
-      - This is a PERSON test only because detector.py passes classes=[0] into predict(),
-        so non-person detections are discarded inside NMS and never exist. Hand this
-        function boxes from an unfiltered model and it fires on a chair. Class filtering
-        is upstream's job and must stay there.
+      - This is a CAR test only because detector.py passes classes=[2] into predict(),
+        so non-car detections are discarded inside NMS and never exist. Hand this
+        function boxes from an unfiltered model and it fires on a person, a chair, or
+        anything else the model knows. Class filtering is upstream's job and must stay
+        there.
       - All four comparisons are inclusive: a box whose edge lands exactly on the pixel
         counts as covering it.
       - There is no confidence floor beyond Ultralytics' 0.25 default and no minimum box
@@ -46,7 +47,7 @@ def center_is_covered(boxes, cx, cy):
         this loop       0.10   0.17   0.34   1.14   1.86
 
     Four comparison ops, three ands and an .any() each carry microseconds of per-call
-    overhead no matter how small the array is. With classes=[0] on a 300x300 ROI the
+    overhead no matter how small the array is. With classes=[2] on a 300x300 ROI the
     count is single digits, so there is no crossover to worry about and no reason for a
     second implementation. The Mac is faster than the Pi; the shape of the result is not.
 

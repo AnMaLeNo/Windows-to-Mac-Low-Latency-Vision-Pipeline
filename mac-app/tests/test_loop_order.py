@@ -23,11 +23,11 @@ from macvision.stats import LatencyStats
 
 
 def capture(seq, frame="frame", width=ROI_W, height=ROI_H, upstream_ms=1.0,
-            transit_ms=5.0, dropped=0, note=None):
+            transit_ms=5.0, dropped=0, note=None, stale=False):
     """One Capture, as a source would hand it over."""
     return Capture(frame, time.perf_counter(), seq, width, height,
                    upstream_ms=upstream_ms, transit_ms=transit_ms, dropped=dropped,
-                   note=note)
+                   note=note, stale=stale)
 
 
 class FakeSource:
@@ -156,6 +156,25 @@ def run_tests():
     check("the held state is never contradicted", r["trigger"].states, [True, True])
     if "[warn] nothing here" not in r["stderr"]:
         failures.append("the source's note was not printed on the empty-frame path")
+
+    # --- a STALE source releases; a merely empty tick holds -------------------------
+    # These are opposite actions on the same frame=None, and which one is right depends
+    # entirely on the source. DXGI produces no frames on a static screen, so silence on
+    # the wire is normal and the state must be held. A camera that stops delivering is
+    # dead, and holding would keep a key down on a Mac that can no longer see anything.
+    r = drive([capture(1), capture(2, frame=None, stale=True), capture(3)],
+              boxes=[covering, covering])
+    check("a stale capture releases the trigger",
+          r["trigger"].states, [True, False, True])
+    check("and it is a real write, not a skipped frame",
+          r["log"].count("trigger.update"), 3)
+    check("but nothing is drawn for it", r["log"].count("display.annotate"), 2)
+
+    # The same capture without the stale flag must NOT release.
+    r = drive([capture(1), capture(2, frame=None), capture(3)],
+              boxes=[covering, covering])
+    check("a non-stale empty capture holds instead",
+          r["trigger"].states, [True, True])
 
     # --- mac_ms is sampled before present(), decide_ms before annotate() -----------
     r = drive([capture(1)], boxes=[covering], present_delay=0.05)

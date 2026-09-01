@@ -49,7 +49,7 @@ def parse_args(argv=None):
     p = argparse.ArgumentParser(
         prog="macvision",
         description="Takes a frame stream - from the Windows agent over UDP, or from a "
-                    "camera on this Mac - detects a person on the centre pixel of the "
+                    "camera on this Mac - detects a car on the centre pixel of the "
                     "region, and pushes one byte of state to whatever holds the key "
                     "down on the PC.",
     )
@@ -92,10 +92,10 @@ def parse_args(argv=None):
         "--source",
         # Read at run time, same reasoning as --trigger-target: a literal default would
         # make the flag always present and silently shadow the environment.
-        default=os.environ.get("MACVISION_SOURCE", ""),
+        default=os.environ.get("FRAME_SOURCE", ""),
         help="where frames come from. udp://[host][:port] for the Windows agent, or "
              "camera://<index>[?crop=x,y,w,h&size=WxH&fps=N] for a camera on this Mac. "
-             "Defaults to $MACVISION_SOURCE, then udp")
+             "Defaults to $FRAME_SOURCE, then udp")
     src.add_argument("--udp-port", type=int, default=UDP_PORT,
                      help=f"where the Windows agent sends (default {UDP_PORT}); "
                           f"overridden by a port inside --source")

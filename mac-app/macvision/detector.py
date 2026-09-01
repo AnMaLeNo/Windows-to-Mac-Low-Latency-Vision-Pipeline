@@ -9,12 +9,13 @@ from .protocol import ROI_H, ROI_W
 
 WEIGHTS_PATH = "yolov8n.pt"  # swap this one line for your own trained model later
 
-# Class indices to keep. 0 is "person" in COCO - filtering here (rather than after the
-# fact) means non-person detections are discarded inside NMS, so they never reach
-# result.plot() either. It must stay a predict() argument and never become a post-filter:
-# making the detector generic would cost more NMS work per frame, draw non-person boxes
-# in the debug window, and - the real hazard - let the centre-pixel test match a chair.
-CLASSES = [0]
+# Class indices to keep. 2 is "car" in COCO - filtering here (rather than after the
+# fact) means non-car detections are discarded inside NMS, so they never reach
+# result.plot() either. Add 5 ("bus") and 7 ("truck") here if you want those too.
+# It must stay a predict() argument and never become a post-filter: making the detector
+# generic would cost more NMS work per frame, draw irrelevant boxes in the debug window,
+# and - the real hazard - let the centre-pixel test match something that is not a car.
+CLASSES = [2]
 
 DEVICE = "mps"
 

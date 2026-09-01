@@ -17,10 +17,12 @@ Both sources take a plug point - a decoder for udp, a capture object for camera 
 this runs with no opencv at all.
 """
 
+import io
 import socket
 import struct
 import sys
 import time
+from contextlib import redirect_stderr, redirect_stdout
 
 from macvision.protocol import HEADER_FORMAT
 from macvision.sources import Capture, Source, build_source, parse_source
@@ -46,10 +48,11 @@ class FakeDecoder:
 class FakeCam:
     """Anything with .read()/.release() drives CameraSource."""
 
-    def __init__(self, w=640, h=480, fps=400.0, ok_frames=None):
+    def __init__(self, w=640, h=480, fps=400.0, ok_frames=None, brightest=200):
         self.w, self.h, self.period = w, h, 1.0 / fps
         self.n = 0
         self.ok_frames = ok_frames
+        self.brightest = brightest
         self.released = False
 
     def read(self):
@@ -60,7 +63,7 @@ class FakeCam:
         # Stamped with the read number: without an identity, "the reader kept only the
         # newest" cannot be asserted, only the drop COUNTER can - and a reader that
         # latched the first frame forever would still move that counter.
-        return True, _Frame(self.h, self.w, n=self.n)
+        return True, _Frame(self.h, self.w, n=self.n, brightest=self.brightest)
 
     def set(self, *a):
         return True
@@ -72,21 +75,27 @@ class FakeCam:
 class _Frame:
     """A stand-in for an ndarray: only .shape and slicing are ever used."""
 
-    def __init__(self, h, w, y=0, x=0, n=0):
+    def __init__(self, h, w, y=0, x=0, n=0, brightest=200):
         self.shape = (h, w, 3)
         self._origin = (y, x)
         self.n = n
+        self._brightest = brightest
+
+    def max(self):
+        """open() checks this to catch an all-black feed - almost always the macOS
+        camera permission, granted to the terminal rather than to python."""
+        return self._brightest
 
     def __getitem__(self, key):
         ys, xs = key
         return _Frame(ys.stop - ys.start, xs.stop - xs.start, ys.start, xs.start,
-                      n=self.n)
+                      n=self.n, brightest=self._brightest)
 
 
 def cm_timeout():
-    """The camera's stall timeout, read live so a test cannot drift from the module."""
+    """The camera's stale threshold, read live so a test cannot drift from the module."""
     import macvision.sources.camera as cm
-    return cm.READ_TIMEOUT_S
+    return cm.STALE_AFTER_S
 
 
 def datagram(seq, body=b"\xff\xd8jpeg", w=300, h=300, win_us=1500, age_us=5000):
@@ -295,7 +304,7 @@ def run():
                             f"be one frame period, not the length of the stall")
 
         # The Condition handshake itself: recv() must be woken by notify(), not by the
-        # READ_TIMEOUT_S fallback. Dropping the notify() leaves every recv() waiting the
+        # STALE_AFTER_S fallback. Dropping the notify() leaves every recv() waiting the
         # full timeout - 2 seconds per frame - and no counter moves, so nothing else
         # here would notice.
         c.recv()                       # drain whatever is pending
@@ -306,7 +315,7 @@ def run():
             failures.append("recv() timed out waiting for a frame from a live camera")
         elif waited > 0.5 * cm_timeout():
             failures.append(f"recv() waited {waited:.2f}s for the next frame; it fell "
-                            f"through to the READ_TIMEOUT_S fallback instead of being "
+                            f"through to the STALE_AFTER_S fallback instead of being "
                             f"woken by notify()")
 
         time.sleep(0.1)
@@ -329,6 +338,7 @@ def run():
         failures.append("an out-of-bounds crop was accepted")
 
     # A device that never yields a frame must fail at open(), not silently later.
+    # ok_frames=0 means every read fails, including all WARMUP_FRAMES of them.
     try:
         CameraSource(device=9, capture=FakeCam(ok_frames=0)).open()
     except OSError:
@@ -340,8 +350,8 @@ def run():
 
     # A camera that dies mid-run must HOLD the state, never release the key.
     import macvision.sources.camera as cm
-    saved = cm.READ_TIMEOUT_S
-    cm.READ_TIMEOUT_S = 0.2
+    saved = cm.STALE_AFTER_S
+    cm.STALE_AFTER_S = 0.2
     try:
         dying = FakeCam(ok_frames=2)
         c = CameraSource(device=0, capture=dying)
@@ -349,11 +359,87 @@ def run():
         c.recv()
         cap = c.recv()
         check("a dead camera yields no frame", cap.frame, None)
-        if "held" not in (cap.note or ""):
-            failures.append(f"the stall note does not say the state is held: {cap.note!r}")
+        # And it must say so, not merely go quiet: a camera that stops delivering is
+        # dead, not idle, so the safe action inverts from hold to release. Applying the
+        # udp source's DXGI reasoning here would keep a key down on a blind Mac.
+        check("and marks itself stale so the loop releases", cap.stale, True)
+        if "releasing" not in (cap.note or ""):
+            failures.append(f"the stall note does not say it is releasing: {cap.note!r}")
         c.close()
     finally:
-        cm.READ_TIMEOUT_S = saved
+        cm.STALE_AFTER_S = saved
+
+    # --- behaviour ported from the hardware-tested camera source ---------------------
+    # Continuity Camera's first frames are routinely black or half-decoded, so open()
+    # reads past WARMUP_FRAMES before probing the geometry. A camera whose first frames
+    # fail must still open if it recovers within the warmup.
+    class LateCam(FakeCam):
+        def read(self):
+            time.sleep(self.period)
+            self.n += 1
+            if self.n < 5:                      # the first four reads fail
+                return False, None
+            return True, _Frame(self.h, self.w, n=self.n, brightest=self.brightest)
+
+    try:
+        late = CameraSource(device=0, capture=LateCam())
+        late.open()
+        check("a camera that only settles after a few reads still opens",
+              (late.width, late.height), (640, 480))
+        late.close()
+    except Exception as exc:
+        failures.append(f"a camera that settles during the warmup failed to open: {exc!r}")
+
+    # An all-black feed is almost always the macOS camera permission, granted to the
+    # terminal rather than to python. Not fatal - a dark room looks the same - but it
+    # must be named, or YOLO spends an hour finding nothing.
+    err = io.StringIO()
+    with redirect_stderr(err), redirect_stdout(io.StringIO()):
+        dark = CameraSource(device=0, capture=FakeCam(brightest=0))
+        dark.open()
+        dark.close()
+    if "black" not in err.getvalue() or "permission" not in err.getvalue():
+        failures.append(f"an all-black feed was not reported: {err.getvalue()!r}")
+    # A merely dim room must NOT trip it.
+    err = io.StringIO()
+    with redirect_stderr(err), redirect_stdout(io.StringIO()):
+        dim = CameraSource(device=0, capture=FakeCam(brightest=40))
+        dim.open()
+        dim.close()
+    if "black" in err.getvalue():
+        failures.append("a dim but non-black feed was reported as black")
+
+    # A steady stream of failed reads means the handle is dead and will never recover;
+    # the reader trades it for a new one rather than reading a corpse forever.
+    class DyingCam(FakeCam):
+        def __init__(self, **kw):
+            super().__init__(**kw)
+            self.alive_until = 3
+
+        def read(self):
+            time.sleep(self.period)
+            self.n += 1
+            if self.n > self.alive_until:
+                return False, None
+            return True, _Frame(self.h, self.w, n=self.n, brightest=self.brightest)
+
+    import macvision.sources.camera as cm2
+    saved_after, saved_backoff = cm2.REOPEN_AFTER_FAILURES, cm2.REOPEN_BACKOFF_S
+    cm2.REOPEN_AFTER_FAILURES, cm2.REOPEN_BACKOFF_S = 5, 0.01
+    try:
+        dying = DyingCam()
+        c3 = CameraSource(device=0, capture=dying)
+        with redirect_stderr(io.StringIO()), redirect_stdout(io.StringIO()):
+            c3.open()
+            reopened = []
+            c3._reopen = lambda: reopened.append(1)   # no cv2 here to build a handle
+            time.sleep(0.4)
+            c3.close()
+        if not reopened:
+            failures.append("a run of failed reads never triggered a reopen")
+        check("reopens are counted", c3.reopens > 0, True)
+    finally:
+        cm2.REOPEN_AFTER_FAILURES, cm2.REOPEN_BACKOFF_S = saved_after, saved_backoff
 
     # --- the shared contract ---------------------------------------------------------
     for cls in (UdpSource, CameraSource):

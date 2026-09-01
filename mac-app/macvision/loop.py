@@ -42,12 +42,19 @@ def run(source, detector, action, stats, display, roi_w, roi_h,
             cap = source.recv()
 
             if cap.frame is None:
-                # No usable image. HOLD the current state: a corrupt datagram, a camera
-                # that stalled, or a runt packet is not evidence that the person left.
-                # The loop must never be made total over action.update() - "call it
-                # once per iteration, with hit=False when there is no frame" turns one
-                # bad packet into a visible key release. The only thing entitled to
-                # clear a state without new information is the far end's watchdog.
+                if cap.stale:
+                    # The source has established it has no live input - a camera that
+                    # stopped delivering, not merely a tick with nothing new. Being
+                    # blind is not evidence that the car is still there, and this Mac
+                    # can decide that faster than the far end's 250ms watchdog can.
+                    action.update(False)
+                else:
+                    # HOLD the current state. A corrupt datagram or a runt packet is not
+                    # evidence that the car left, and the loop must never be made total
+                    # over action.update() - "call it once per iteration, with hit=False
+                    # when there is no frame" turns one bad packet into a visible key
+                    # release.
+                    pass
                 if cap.note:
                     print(cap.note, file=sys.stderr, flush=True)
                 continue

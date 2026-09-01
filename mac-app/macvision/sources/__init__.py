@@ -51,9 +51,16 @@ class Capture:
     path ahead of the trigger write may copy the pixels.
 
     frame        BGR ndarray, or None when this tick produced no usable image. None
-                 means HOLD the current trigger state: no new information is not the
-                 same as "no person". The far end's watchdog is the only thing
-                 entitled to clear a state without new information.
+                 alone means HOLD the current trigger state: no new information is not
+                 the same as "no car". A corrupt datagram must not become a key release.
+    stale        set only when the source has established it has no live input at all -
+                 not "nothing new this tick" but "this device has stopped". Then the
+                 safe action inverts: release. The distinction is the whole difference
+                 between the two sources. DXGI produces no frames on a static screen, so
+                 silence on the wire is normal and holding is right; a camera that stops
+                 delivering is dead, not idle, and holding would keep a key down on a
+                 machine that can no longer see anything. Getting this wrong in the
+                 camera's favour was a real bug: the DXGI reasoning does not transfer.
     t0           perf_counter() at acquisition. The origin for decide_ms and mac_ms,
                  and it is taken inside the source because that is the only place that
                  knows when the frame actually arrived.
@@ -73,10 +80,10 @@ class Capture:
     """
 
     __slots__ = ("frame", "t0", "seq", "width", "height", "upstream_ms", "transit_ms",
-                 "dropped", "note")
+                 "dropped", "note", "stale")
 
     def __init__(self, frame, t0, seq, width, height, upstream_ms=None,
-                 transit_ms=None, dropped=0, note=None):
+                 transit_ms=None, dropped=0, note=None, stale=False):
         self.frame = frame
         self.t0 = t0
         self.seq = seq
@@ -86,6 +93,7 @@ class Capture:
         self.transit_ms = transit_ms
         self.dropped = dropped
         self.note = note
+        self.stale = stale
 
 
 class Source:
@@ -139,7 +147,7 @@ class Source:
 
 
 def parse_source(target):
-    """--source / $MACVISION_SOURCE -> a plain dict. Pure, and it never raises.
+    """--source / $FRAME_SOURCE -> a plain dict. Pure, and it never raises.
 
     Same contract as trigger.parse_target, for the same reason: urlparse defers port
     validation to attribute access, so a malformed port must not become a traceback out

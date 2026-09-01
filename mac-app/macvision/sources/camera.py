@@ -32,11 +32,23 @@ import time
 
 from . import Capture, Source
 
-# How long recv() waits for a frame before giving up on this tick. A camera that is
-# alive produces frames at its own rate, so silence this long means it is gone - not
-# that nothing is moving. Long enough to never trip on a slow first frame, short enough
-# that a dead camera does not hang the process.
-READ_TIMEOUT_S = 2.0
+# A camera that has gone this long without delivering is dead, not idle. Comfortably
+# longer than a frame interval at any rate worth running (Continuity Camera measures
+# ~24fps, i.e. 42ms), so ordinary jitter never trips it - and well under the 250ms
+# watchdog at the far end, so this Mac decides to release the key before the Pi has to
+# decide for it.
+STALE_AFTER_S = 0.150
+
+# Continuity Camera's first frames are routinely black or half-decoded while the link
+# comes up. Reading past them at startup means a healthy camera is never misreported.
+WARMUP_FRAMES = 10
+BLACK_LEVEL = 8  # a frame whose brightest pixel is under this is black, not dark
+
+# Consecutive failed reads before the grabber gives up on the handle and reopens it. A
+# handful of failures is normal when Continuity Camera renegotiates; a steady stream of
+# them means the device is gone and the handle will never recover on its own.
+REOPEN_AFTER_FAILURES = 30
+REOPEN_BACKOFF_S = 0.5
 
 
 def list_cameras(limit=8):
@@ -83,6 +95,7 @@ class CameraSource(Source):
         self.frames_read = 0
         self.stale_dropped = 0
         self.read_errors = 0
+        self.reopens = 0
         self.stalls = 0
         self._seq = 0
         self._pending = None
@@ -121,20 +134,48 @@ class CameraSource(Source):
             # honour it, it shortens the queue the reader thread has to keep draining.
             self._cap.set(getattr(cv2, "CAP_PROP_BUFFERSIZE", 38), 1)
 
-        ok, frame = self._cap.read()
-        if not ok or frame is None:
+        # Read past the warmup rather than trusting the first frame: Continuity
+        # Camera's opening frames are routinely black or half-decoded, and a geometry
+        # probe taken from one of those reports a healthy camera as broken.
+        frame = None
+        for _ in range(WARMUP_FRAMES):
+            ok, candidate = self._cap.read()
+            if ok and candidate is not None:
+                frame = candidate
+        if frame is None:
             raise OSError(
-                f"camera {self.device!r} opened but produced no frame. Check the device "
-                f"index (try --list-cameras), and that this terminal has Camera "
-                f"permission in System Settings -> Privacy & Security -> Camera.")
+                f"camera {self.device!r} opened but produced no frame in "
+                f"{WARMUP_FRAMES} reads. Check the device index (try --list-cameras), "
+                f"and that this terminal has Camera permission in System Settings -> "
+                f"Privacy & Security -> Camera.")
 
         full_h, full_w = frame.shape[0], frame.shape[1]
+        try:
+            brightest = int(frame.max())
+        except Exception:
+            brightest = None
+        if brightest is not None and brightest < BLACK_LEVEL:
+            # Not fatal - a genuinely dark room looks the same - but this is nearly
+            # always the macOS camera permission, which is granted to the app that owns
+            # this process rather than to python. Worth naming before YOLO spends an
+            # hour finding nothing in black frames.
+            print(f"[camera] WARNING: every frame is black. Usually the macOS camera "
+                  f"permission, granted to your terminal or editor rather than to "
+                  f"python (System Settings -> Privacy & Security -> Camera).",
+                  file=sys.stderr, flush=True)
         self._validate_crop(full_w, full_h)
         cropped = self._apply_crop(frame)
         self.height, self.width = cropped.shape[0], cropped.shape[1]
-        self.description = (f"camera {self.device} {full_w}x{full_h}"
+        # The granted resolution, not the requested one: AVFoundation snaps to the
+        # nearest format it supports rather than refusing, so what was asked for and
+        # what arrived can differ and only the second one matters.
+        asked = "" if not self.size else f" (asked {self.size[0]}x{self.size[1]})"
+        self.description = (f"camera {self.device} {full_w}x{full_h}{asked}"
                             + (f" crop {self.width}x{self.height}"
                                f"@{self.crop[0]},{self.crop[1]}" if self.crop else ""))
+        if self.crop:
+            print(f"[camera] {self.description} = "
+                  f"{100 * self.height / full_h:.0f}% of frame height", flush=True)
         self._thread.start()
 
     def _validate_crop(self, full_w, full_h):
@@ -146,7 +187,9 @@ class CameraSource(Source):
         if x < 0 or y < 0 or x + w > full_w or y + h > full_h:
             # Numpy would clamp silently, handing the detector a frame of the wrong
             # shape - which the warmup was not built for, and which moves the centre
-            # pixel the rule tests. Refuse instead.
+            # pixel the rule tests. Refuse instead. AVFoundation snaps to the nearest
+            # format it supports rather than refusing, so size= is a request and this
+            # can fail even when the arithmetic looked right when it was typed.
             raise ValueError(
                 f"crop {self.crop} does not fit inside the camera's {full_w}x{full_h} "
                 f"frame. Reduce the crop, or raise the resolution with size=WxH.")
@@ -159,6 +202,30 @@ class CameraSource(Source):
         # write may copy the pixels.
         return frame[y:y + h, x:x + w]
 
+    def _reopen(self):
+        """Trade a dead handle for a fresh one. Only the reader thread calls this."""
+        import cv2  # lazy: this path only exists once a real device is open
+
+        old = self._cap
+        try:
+            backend = getattr(cv2, "CAP_AVFOUNDATION", 0) if sys.platform == "darwin" \
+                else getattr(cv2, "CAP_ANY", 0)
+            fresh = cv2.VideoCapture(self.device, backend)
+            if self.size:
+                fresh.set(cv2.CAP_PROP_FRAME_WIDTH, self.size[0])
+                fresh.set(cv2.CAP_PROP_FRAME_HEIGHT, self.size[1])
+            if self.fps:
+                fresh.set(cv2.CAP_PROP_FPS, self.fps)
+            self._cap = fresh
+        except Exception as exc:
+            print(f"[camera] reopen failed ({exc}); keeping the old handle",
+                  file=sys.stderr, flush=True)
+            return
+        try:
+            old.release()
+        except Exception:
+            pass
+
     def flush(self):
         """Drop whatever the reader thread accumulated during the model warmup."""
         with self._lock:
@@ -170,23 +237,39 @@ class CameraSource(Source):
     # --- the reader thread -----------------------------------------------------------
 
     def _reader(self):
+        consecutive = 0
         while not self._stop.is_set():
+            failed = None
             try:
                 ok, frame = self._cap.read()
+                if not ok or frame is None:
+                    failed = "read returned no frame"
             except Exception as exc:
+                failed = str(exc)
+
+            if failed is not None:
                 self.read_errors += 1
+                consecutive += 1
                 if self.read_errors in (1, 10) or self.read_errors % 500 == 0:
-                    print(f"[camera] read failed ({exc}); continuing "
+                    print(f"[camera] {failed}; is the device still there? "
                           f"[{self.read_errors} so far]", file=sys.stderr, flush=True)
-                time.sleep(0.05)
+                if consecutive >= REOPEN_AFTER_FAILURES:
+                    # A handful of failures is normal while Continuity Camera
+                    # renegotiates. A steady stream of them means the handle is dead and
+                    # will never recover on its own, so trade it for a new one rather
+                    # than reading a corpse forever.
+                    consecutive = 0
+                    self.reopens += 1
+                    print(f"[camera] {REOPEN_AFTER_FAILURES} failed reads in a row; "
+                          f"reopening the device [{self.reopens} so far]",
+                          file=sys.stderr, flush=True)
+                    if self._stop.wait(REOPEN_BACKOFF_S):
+                        return
+                    self._reopen()
+                else:
+                    time.sleep(0.05)
                 continue
-            if not ok or frame is None:
-                self.read_errors += 1
-                if self.read_errors in (1, 10) or self.read_errors % 500 == 0:
-                    print(f"[camera] read returned no frame; is the device still there? "
-                          f"[{self.read_errors} so far]", file=sys.stderr, flush=True)
-                time.sleep(0.05)
-                continue
+            consecutive = 0
 
             # Stamped here, on the thread that actually took the frame. Anywhere later
             # would fold the handoff delay into the camera's own latency and hide it.
@@ -208,20 +291,27 @@ class CameraSource(Source):
     # --- the hot path ----------------------------------------------------------------
 
     def recv(self):
+        deadline = time.perf_counter() + STALE_AFTER_S
         with self._new:
-            if self._pending is None:
-                self._new.wait(READ_TIMEOUT_S)
+            while self._pending is None:
+                remaining = deadline - time.perf_counter()
+                if remaining <= 0:
+                    break
+                self._new.wait(remaining)
             if self._pending is None:
                 self.stalls += 1
-                # A frame of None means HOLD the current state, exactly as a corrupt
-                # datagram does on the udp source. It does NOT release the key: this is
-                # the same stuck-key hole trigger.py documents - a Mac that is alive but
-                # blind keeps feeding the far end's watchdog. Ctrl-C is the way out.
+                # stale=True, NOT a plain held state. A camera silent this long has
+                # stopped, and being blind is not evidence that the car is still there -
+                # so the loop releases. This is the opposite of what the udp source
+                # does, and deliberately: DXGI produces no frames on a static screen, so
+                # silence on the wire is normal. Applying that reasoning to a camera was
+                # a real bug - it would keep a key held on a Mac that can no longer see.
+                # 150ms is well inside the far end's 250ms watchdog, so this Mac decides
+                # before the Pi has to.
                 return Capture(None, time.perf_counter(), self._seq,
-                               self.width, self.height,
-                               note=f"[camera] no frame for {READ_TIMEOUT_S:g}s; "
-                                    f"the trigger state is being held "
-                                    f"[{self.stalls} stalls]")
+                               self.width, self.height, stale=True,
+                               note=f"[camera] no frame for {STALE_AFTER_S:g}s; "
+                                    f"releasing the trigger [{self.stalls} stalls]")
             frame, t0 = self._pending
             self._pending = None
             dropped = self._dropped_since_recv
@@ -246,7 +336,8 @@ class CameraSource(Source):
                 "device": self.device, "crop": list(self.crop) if self.crop else None,
                 "size": [self.width, self.height], "fps_requested": self.fps,
                 "frames_read": self.frames_read, "stale_dropped": self.stale_dropped,
-                "read_errors": self.read_errors, "stalls": self.stalls,
+                "read_errors": self.read_errors, "reopens": self.reopens,
+                "stalls": self.stalls,
                 "idle_s": round(self.idle_s, 3)}
 
     def close(self):

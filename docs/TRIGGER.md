@@ -15,12 +15,12 @@ point, and it is a bare wire — nothing to parse, nothing to time out.
 
 ## The rule
 
-Per frame, on the Mac: **is the ROI's centre pixel inside any detected person's bounding
+Per frame, on the Mac: **is the ROI's centre pixel inside any detected car's bounding
 box?** Implemented in `center_is_covered()` in [`mac-app/macvision/rule.py`](../mac-app/macvision/rule.py) —
 a point-in-box test over the boxes pulled off the GPU once. Class filtering happens
-upstream in [`macvision/detector.py`](../mac-app/macvision/detector.py) (`classes=[0]`), and that
+upstream in [`macvision/detector.py`](../mac-app/macvision/detector.py) (`classes=[2]`), and that
 precondition is what makes the extracted rule safe: handed an unfiltered model's boxes it
-would fire on a chair.
+would fire on a person or a chair.
 
 True → the key goes down and *stays* down. False → it comes back up. The key is held for
 exactly as long as the condition holds, so Windows' own key-repeat decides what a held key

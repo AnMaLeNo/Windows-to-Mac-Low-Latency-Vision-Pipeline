@@ -20,7 +20,7 @@ def parse_args(argv=None):
     p = argparse.ArgumentParser(
         prog="piproxy",
         description="Keyboard proxy: forwards a real keyboard to a PC and injects a "
-                    "key when the Mac's vision pipeline says a person is on the ROI.",
+                    "key when the Mac's vision pipeline says a car is on the ROI.",
     )
     out = p.add_argument_group("output")
     out.add_argument("--sink", choices=("log", "serial", "hidg"), default="log",
@@ -50,7 +50,7 @@ def parse_args(argv=None):
 
     trg = p.add_argument_group("trigger")
     trg.add_argument("--trigger-key", default="k",
-                     help="key held while a person covers the ROI centre (default k). "
+                     help="key held while a car covers the ROI centre (default k). "
                           "f13-f15 exist on no real keyboard, so they can never "
                           "collide with something you actually press")
     trg.add_argument("--udp-port", type=int, default=TRIGGER_PORT)

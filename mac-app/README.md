@@ -13,6 +13,8 @@ Three blocks, and each is swappable without touching the others:
 Whichever source runs, the detector, the rule and the action never learn which — and
 `--source` is the whole change.
 
+The trigger rule, the detector and the debug window are identical whichever source runs.
+
 ## Setup
 
 ```bash
@@ -60,7 +62,7 @@ letting you find out by watching a key that never arrives.
 | `camera://0?crop=x,y,w,h&size=WxH&fps=N` | a region of a camera, at a chosen mode |
 | `camera:///dev/video0` | a camera by device path |
 
-`--list-cameras` probes which indices answer. `$MACVISION_SOURCE` is the environment
+`--list-cameras` probes which indices answer. `$FRAME_SOURCE` is the environment
 equivalent. The crop is validated against the camera's real frame at startup and
 refused if it does not fit — numpy would otherwise clamp it silently and hand the
 detector a frame of the wrong shape.
@@ -71,7 +73,52 @@ The env var is what the READMEs and the muscle memory use; the flag is an extra 
 `--roi-w/--roi-h`, `--udp-port`, `--list-ports`, …) and works on a machine with neither
 opencv nor ultralytics installed.
 
-A window titled "debug" shows the received ROI feed with detection boxes and a per-frame
+### Finding the camera index
+
+**Indices are not stable, and they cannot be derived.** Plugging in the iPhone inserts it
+at index 0 and pushes the built-in camera to 1 — and `system_profiler` lists the two in
+the *opposite* order, so there is no name-to-index mapping to rely on. OpenCV's
+AVFoundation backend addresses cameras by number and cannot report their names at all.
+
+So find it by looking:
+
+```bash
+python3 tools/list_cameras.py 6
+```
+
+It probes each index, reports the resolution and the *measured* frame rate, and writes a
+preview per camera with the 300×300 crop marked. Identify the iPhone from the previews.
+(Measured, because the advertised rate is fiction: the iPhone reports 1 fps and delivers 24.)
+
+Two failures it is built to tell apart, since both look like a camera that will not open:
+
+- **No macOS camera permission.** It is granted to the app that owns the process —
+  Terminal, iTerm, your editor — never to `python`. Run from a real terminal and answer
+  the prompt, or check System Settings > Privacy & Security > Camera. Denied, frames
+  arrive all-black rather than failing.
+- **Continuity Camera not offered.** The iPhone must be locked, stationary, rear camera
+  facing the scene, same Apple ID. *Unlocking it ends the session.* USB removes the
+  wireless latency but none of those conditions. If `system_profiler` does not list the
+  iPhone, no index will find it.
+
+### Field of view
+
+The crop is native pixels, **never resized** — a 1:1 window on the sensor output. So the
+capture resolution is the only thing that decides how much of the scene those 300×300
+pixels cover: 28% of frame height at 1080p, 42% at 720p, 62% at 480p. To see more of the
+world at the same sharpness, raise the capture resolution with `--source "camera://0?size=WxH"`.
+
+### Why silence means different things
+
+A camera that stops delivering releases the trigger after 150ms; a silent Windows source
+does not, and holds the key. That asymmetry is deliberate: DXGI only produces a frame when
+the screen changes, so silence there means "nothing moved". A camera always produces
+frames, so silence means the iPhone locked or the link dropped — and holding the last
+decision would leave a key pressed until the process died. The camera source also reopens
+its handle on its own when Continuity Camera drops - see
+[`macvision/sources/camera.py`](macvision/sources/camera.py).
+
+A window titled "debug" shows the current frame with detection boxes and a per-frame
 timing overlay. A crosshair marks the ROI's centre pixel — the pixel the trigger rule tests —
 and turns red when the trigger is firing. Press `q` in that window to quit. The first run downloads `yolov8n.pt`
 automatically (stock COCO weights, just to validate the pipeline end to end — swap the

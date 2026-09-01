@@ -91,9 +91,9 @@ def main():
             print(f"    {box} -> {'COVERS' if covered else 'misses'} the centre")
         hit = center_is_covered(boxes, cx, cy)
         print(f"    trigger would be: {'ON' if hit else 'off'}")
-        print("    note: these boxes stand in for a person-filtered model. The real "
-              "detector passes classes=[0], so an unfiltered model's boxes would "
-              "include chairs and fire on them.")
+        print("    note: these boxes stand in for a car-filtered model. The real "
+              "detector passes classes=[2], so an unfiltered model's boxes would "
+              "include people and chairs and fire on them.")
 
     if problems:
         print(f"\nFAIL: {len(problems)} problem(s) with this datagram:")
