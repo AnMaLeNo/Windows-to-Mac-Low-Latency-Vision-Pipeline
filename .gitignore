@@ -1,6 +1,8 @@
+.DS_Store
 windows-agent/build/
 windows-agent/out/
 tools/received/
+mac-app/tools/camera_previews/
 mac-app/venv/
 mac-app/__pycache__/
 mac-app/*.pt
