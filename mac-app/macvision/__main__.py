@@ -20,6 +20,11 @@ nothing in the code makes that visible:
      loading.
   3. the detector. The MPS/Metal warmup lands here, shaped by step 2.
   4. the debug window. A failure here is not fatal.
+  4b. the telemetry tap (docs/DASHBOARD.md), only when --telemetry or
+     $MACVISION_TELEMETRY names a socket. After the window, because its hello reports
+     the window's status; before the banner, so the banner can say it is on. Like the
+     window, a failure here is not fatal - a busy port is a warning and the pipeline
+     runs without it.
   5. source.flush(), LAST, immediately before the loop. Everything that arrived during
      the multi-second warmup is discarded, so the first frame processed is genuinely
      fresh.
@@ -30,10 +35,14 @@ microseconds; a camera cannot be, so the freshness guarantee had to move from th
 of construction to an explicit flush. It is also strictly more robust: it covers the
 model load, the window creation and anything else added between.
 
+Teardown runs in reverse, in a finally block: window, telemetry, source, and the
+trigger LAST, because it is what releases the key.
+
 See mac-app/README.md.
 """
 
 import argparse
+import json
 import os
 import signal
 import sys
@@ -42,10 +51,22 @@ from .loop import run
 from .protocol import ROI_H, ROI_W, UDP_PORT
 from .sources import build_source, parse_source
 from .stats import STATS_EVERY, STATS_WINDOW, LatencyStats
+from .telemetry import (DEFAULT_HOST as TELEMETRY_HOST, DEFAULT_PORT as TELEMETRY_PORT,
+                        TelemetryPublisher, json_safe, parse_telemetry)
 from .trigger import BAUD, list_ports, open_trigger
 
+# The flags that make macvision print something and exit. --describe-args reports them
+# as `oneshot` so the dashboard never sends one with a launch (docs/DASHBOARD.md,
+# contract 2) and offers them as probes instead.
+ONESHOT = ("list_ports", "list_cameras")
 
-def parse_args(argv=None):
+
+def build_parser():
+    """The parser, and nothing else - parse_args() validates, describe_parser() reads.
+
+    Built fresh on every call, never at import time, because several defaults are read
+    from the environment and must reflect it at the moment of the call.
+    """
     p = argparse.ArgumentParser(
         prog="macvision",
         description="Takes a frame stream - from the Windows agent over UDP, or from a "
@@ -57,7 +78,7 @@ def parse_args(argv=None):
     trg = p.add_argument_group("trigger")
     trg.add_argument(
         "--trigger-target",
-        # Computed HERE, inside parse_args, so the environment is read at run time.
+        # Computed HERE, inside the builder, so the environment is read at run time.
         # default="auto" would be wrong in a way nothing would show you: the flag would
         # then always be present, open_trigger() would never consult the environment, and
         # TRIGGER_TARGET would break silently - exactly the class of failure commit
@@ -142,13 +163,44 @@ def parse_args(argv=None):
     tim.add_argument("--stats-window", type=int, default=STATS_WINDOW,
                      help=f"frames kept for the rolling stats (default {STATS_WINDOW})")
 
+    tel = p.add_argument_group("telemetry")
+    tel.add_argument(
+        "--telemetry",
+        # Read at run time, like --source: the dashboard launches macvision with
+        # $MACVISION_TELEMETRY set and no flag, and a literal default would shadow it.
+        default=os.environ.get("MACVISION_TELEMETRY", ""),
+        help="publish each processed frame and the [stats] line on a TCP socket, for "
+             "the dashboard (docs/DASHBOARD.md - this is its input). Off by default, "
+             "and then not one instruction runs for it. tcp://[host][:port] listens "
+             f"there (default {TELEMETRY_HOST}:{TELEMETRY_PORT}; IPv4 only); none "
+             "turns it off explicitly. Defaults to $MACVISION_TELEMETRY. With a "
+             "subscriber connected it costs the frame loop one copy of the ROI per "
+             "frame, after the trigger byte; with none, nothing")
+
     p.add_argument("--list-ports", action="store_true",
                    help="list candidate trigger serial devices and exit")
     p.add_argument("--list-cameras", action="store_true",
                    help="probe camera indices and exit. Slow, and it blinks each "
                         "camera's activity light - there is no way to enumerate "
                         "AVFoundation devices through opencv without opening them")
+    p.add_argument("--describe-args", action="store_true",
+                   help="print this parser as JSON (docs/DASHBOARD.md, contract 2) "
+                        "and exit")
+    return p
+
+
+def parse_args(argv=None):
+    p = build_parser()
     args = p.parse_args(argv)
+
+    if args.describe_args:
+        # Returned BEFORE the guards below, deliberately. Contract 2 says this flag
+        # prints the parser and exits 0 whatever else is on the line or in the
+        # environment - and a default the environment supplied that a guard would
+        # refuse ($MACVISION_CLASSES=abc, $MACVISION_TELEMETRY=garbage) is exactly
+        # the value the dashboard's form must get to show, so it can be corrected
+        # there rather than never seen. main() acts on this flag before anything else.
+        return args
 
     # Validated here rather than trusted, because each of these reaches a place with no
     # guard of its own and turns into a crash or a spin mid-run - after the trigger link
@@ -179,6 +231,12 @@ def parse_args(argv=None):
             args.classes = parse_classes(args.classes)
         except ValueError as exc:
             p.error(f"--classes {args.classes!r}: {exc}")
+    # Refused at parse time, not turned into a warning at step 4b: a mistyped
+    # --telemetry that silently ran without telemetry would have the dashboard waiting
+    # forever on a socket that was never opened, with nothing anywhere saying why.
+    spec = parse_telemetry(args.telemetry)
+    if spec["kind"] == "unknown":
+        p.error(f"--telemetry {args.telemetry!r}: {spec['reason']}")
     return args
 
 
@@ -210,6 +268,70 @@ def parse_classes(text):
     return out
 
 
+def describe_parser(parser):
+    """The parser as data - docs/DASHBOARD.md, contract 2.
+
+    The dashboard builds its launch form from this, so a flag added to build_parser()
+    appears there with no dashboard change. Each argument reports its dest, its long
+    flag, a `kind` the form can render (str, int, float, bool, choice), the default AT
+    THE TIME OF THE CALL - which is how $TRIGGER_TARGET and friends show up, since the
+    dashboard runs --describe-args in the environment it will launch with - and whether
+    it is a `oneshot` probe that prints and exits. --help and --describe-args are
+    omitted: neither is a launch parameter.
+    """
+    groups = []
+    options = None
+    # _action_groups and _group_actions are private, and are used anyway: they have been
+    # there unchanged since 2.7, --help itself walks the same lists, and there is no
+    # public way to learn which group an argument was added to.
+    for group in parser._action_groups:
+        args = [_describe_action(action) for action in group._group_actions
+                if action.dest not in ("help", "describe_args")]
+        if not args:
+            continue
+        title = group.title
+        if title in ("optional arguments", "options"):
+            # argparse's default group was renamed in 3.10. One name on the wire, so
+            # the dashboard does not have to know which Python launched macvision.
+            # It is also emitted LAST, whatever place argparse gives it (first: it is
+            # created with the parser), because it holds only the probes and a form
+            # that opens on --list-cameras opens on the wrong thing.
+            options = {"title": "options", "args": args}
+            continue
+        groups.append({"title": title, "args": args})
+    if options is not None:
+        groups.append(options)
+    return {"v": 1, "prog": parser.prog, "description": parser.description,
+            "groups": groups}
+
+
+def _describe_action(action):
+    if action.nargs == 0 and action.const is True:
+        kind = "bool"                      # a store_true flag
+    elif action.choices:
+        kind = "choice"
+    elif action.type is int:
+        kind = "int"
+    elif action.type is float:
+        kind = "float"
+    else:
+        kind = "str"
+    default = action.default
+    if default == argparse.SUPPRESS:
+        default = None
+    long_flags = [s for s in action.option_strings if s.startswith("--")]
+    flag = (long_flags or action.option_strings or [None])[0]
+    return {"dest": action.dest, "flag": flag, "kind": kind,
+            "default": json_safe(default),
+            "choices": list(action.choices) if action.choices else None,
+            "help": action.help, "oneshot": action.dest in ONESHOT}
+
+
+def describe_args():
+    """build_parser(), described. What `--describe-args` prints."""
+    return describe_parser(build_parser())
+
+
 def _raise_interrupt(*_):
     # SIGTERM must RAISE, and SIGINT is deliberately left at its default (which already
     # raises KeyboardInterrupt). A handler that merely sets a flag returns normally, and
@@ -223,6 +345,12 @@ def _raise_interrupt(*_):
 
 def main(argv=None):
     args = parse_args(argv)
+
+    if args.describe_args:
+        # First, before the probes: this is the flag the dashboard runs to learn what
+        # the others are, and it must print the same thing whatever else is on the line.
+        print(json.dumps(describe_args(), indent=2))
+        return 0
 
     if args.list_ports:
         found = list_ports()
@@ -359,6 +487,39 @@ def main(argv=None):
         except Exception as exc:
             print(f"warning: debug window disabled ({exc})", file=sys.stderr)
 
+    # 4b. The telemetry tap - docs/DASHBOARD.md, contract 1. Off unless asked for, and
+    #     like the window a failure is not fatal: the dashboard is a comfort, the
+    #     pipeline is the point. A busy port here is almost always the previous run
+    #     still shutting down, or a second macvision started from the dashboard.
+    telemetry = None
+    telemetry_spec = parse_telemetry(args.telemetry)    # parse_args refused "unknown"
+    if telemetry_spec["kind"] == "tcp":
+        try:
+            telemetry = TelemetryPublisher(
+                telemetry_spec["host"], telemetry_spec["port"],
+                # Runs on the publisher thread, once per subscriber, to fill the hello.
+                # Every block's status() reads plain counters and strings with no lock,
+                # which is what makes it safe to call from off the frame loop's thread.
+                describe=lambda: {
+                    "source": source.status(),
+                    "detector": detector.status(),
+                    "trigger": trigger.status(),
+                    "display": display.status() if display is not None else None,
+                },
+                roi=(roi_w, roi_h),
+                argv=list(argv) if argv is not None else sys.argv[1:])
+            telemetry.start()
+        except Exception as exc:
+            # Not only OSError. A busy port is the common case, but a thread that
+            # cannot start is a RuntimeError, and anything escaping here does so with
+            # the trigger link and the source already open and the try/finally below
+            # not yet reached - so nothing would close them. Step 4 catches the same
+            # way, for the same reason.
+            print(f"warning: telemetry disabled ({exc})", file=sys.stderr)
+            if telemetry is not None:
+                telemetry.stop()
+            telemetry = None
+
     stats = LatencyStats(window=args.stats_window)
 
     # The class names, not the indices. "[2, 5, 7]" is not something anyone can check
@@ -367,7 +528,9 @@ def main(argv=None):
     print(f"[macvision] source {source.description}, roi {roi_w}x{roi_h}, "
           f"firing on {detector.describe_classes()}, "
           f"trigger {trigger.status()['description']}"
-          + ("" if display is not None else ", display off"), flush=True)
+          + ("" if display is not None else ", display off")
+          + (f", telemetry {telemetry.description}" if telemetry is not None else ""),
+          flush=True)
 
     signal.signal(signal.SIGTERM, _raise_interrupt)
 
@@ -388,7 +551,7 @@ def main(argv=None):
     keepalive_died = False
     try:
         rc = run(source, detector, trigger, stats, display, roi_w, roi_h,
-                 stats_every=args.stats_every)
+                 stats_every=args.stats_every, telemetry=telemetry)
         keepalive_died = (not trigger.alive
                           and trigger.status()["kind"] != "none")
     finally:
@@ -401,6 +564,8 @@ def main(argv=None):
         # on the Pi. No key can stay stuck down.
         if display is not None:
             display.close()
+        if telemetry is not None:
+            telemetry.stop()
         source.close()
         trigger.stop()
 

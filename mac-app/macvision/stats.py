@@ -78,24 +78,14 @@ class LatencyStats:
     def n(self):
         return len(self._transit)
 
-    def summary(self):
-        """The [stats] line's body. Never raises on an empty run."""
-        if not self._e2e:
-            return "n=0"
-        if not self._transit:
-            # A single-machine source: no calibration to report, because there was
-            # never a foreign clock in the measurement.
-            return (f"n={len(self._e2e)}  "
-                    f"e2e med={statistics.median(self._e2e):.1f} "
-                    f"max={max(self._e2e):.1f}ms (lower bound)  |  "
-                    f"decide med={statistics.median(self._decide):.1f}ms")
-        return (f"n={len(self._transit)}  "
-                f"e2e med={statistics.median(self._e2e):.1f} "
-                f"max={max(self._e2e):.1f}ms  |  "
-                f"clock offset+hop={min(self._transit):.1f}ms (calibrated out)  |  "
-                f"decide med={statistics.median(self._decide):.1f}ms")
-
     def status(self):
+        """The numbers behind the [stats] line, computed here and only here.
+
+        Two O(window) medians and two scans. summary() renders from this dict rather
+        than recomputing it, so a caller that prints the line AND publishes the numbers
+        - the loop, at the [stats] cadence - pays for them once. Never raises on an
+        empty run.
+        """
         if not self._e2e:
             return {"n": 0, "window": self.window, "e2e_median_ms": None,
                     "e2e_max_ms": None, "decide_median_ms": None, "offset_ms": None}
@@ -107,6 +97,31 @@ class LatencyStats:
             "decide_median_ms": statistics.median(self._decide),
             "offset_ms": min(self._transit) if self._transit else None,
         }
+
+    def summary(self, status=None):
+        """The [stats] line's body, rendered from `status` - the dict status() returned,
+        when the caller already holds one - or from a fresh one. Never raises on an
+        empty run.
+
+        `n` is the e2e count on both lines. A source either always reports a transit
+        (udp) or never does (camera), so on the calibrated line it is also the transit
+        count, which is what that line used to print.
+        """
+        st = status if status is not None else self.status()
+        if not st["n"]:
+            return "n=0"
+        if st["offset_ms"] is None:
+            # A single-machine source: no calibration to report, because there was
+            # never a foreign clock in the measurement.
+            return (f"n={st['n']}  "
+                    f"e2e med={st['e2e_median_ms']:.1f} "
+                    f"max={st['e2e_max_ms']:.1f}ms (lower bound)  |  "
+                    f"decide med={st['decide_median_ms']:.1f}ms")
+        return (f"n={st['n']}  "
+                f"e2e med={st['e2e_median_ms']:.1f} "
+                f"max={st['e2e_max_ms']:.1f}ms  |  "
+                f"clock offset+hop={st['offset_ms']:.1f}ms (calibrated out)  |  "
+                f"decide med={st['decide_median_ms']:.1f}ms")
 
 
 def overlay_text(e2e_ms, upstream_ms, queue_ms, mac_ms, seq, hit,
