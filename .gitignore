@@ -1,7 +1,17 @@
+.DS_Store
 windows-agent/build/
 windows-agent/out/
 tools/received/
+mac-app/tools/camera_previews/
 mac-app/venv/
+mac-app/.venv/
 mac-app/__pycache__/
 mac-app/*.pt
+mac-app/**/*.pt
+mac-app/*.mlpackage/
+mac-app/**/*.mlpackage/
 firmware/*/.pio/
+
+# PlatformIO build output
+.pio/
+__pycache__/

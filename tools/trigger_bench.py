@@ -1,6 +1,6 @@
 """Bench-test the trigger link without the vision pipeline.
 
-Speaks the same one-byte protocol as mac-app/trigger.py, so it exercises the real firmware
+Speaks the same one-byte protocol as mac-app/macvision/trigger.py, so it exercises the real firmware
 path: serial -> ESP32 -> GPIO -> (LED, and the Pro Micro if wired). Runs from either machine;
 on Windows the port is a COMn name, on the Mac a /dev/cu.* path.
 
@@ -20,7 +20,7 @@ import time
 import serial
 
 BAUD = 115200
-KEEPALIVE_S = 0.020  # same cadence as mac-app/trigger.py
+KEEPALIVE_S = 0.020  # same cadence as mac-app/macvision/trigger.py
 
 
 def send(ser, active):

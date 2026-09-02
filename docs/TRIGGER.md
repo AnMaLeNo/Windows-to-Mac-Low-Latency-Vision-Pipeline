@@ -15,16 +15,21 @@ point, and it is a bare wire — nothing to parse, nothing to time out.
 
 ## The rule
 
-Per frame, on the Mac: **is the ROI's centre pixel inside any detected person's bounding
-box?** Implemented in `center_is_covered()` in [`mac-app/receiver.py`](../mac-app/receiver.py) —
-a point-in-box test against `result.boxes.xyxy`, vectorised over all boxes.
+Per frame, on the Mac: **is the ROI's centre pixel inside any detected car's bounding
+box?** Implemented in `center_is_covered()` in [`mac-app/macvision/rule.py`](../mac-app/macvision/rule.py) —
+a point-in-box test over the boxes pulled off the GPU once. Class filtering happens
+upstream in [`macvision/detector.py`](../mac-app/macvision/detector.py) (`classes=[2]`), and that
+precondition is what makes the extracted rule safe: handed an unfiltered model's boxes it
+would fire on a person or a chair.
 
 True → the key goes down and *stays* down. False → it comes back up. The key is held for
 exactly as long as the condition holds, so Windows' own key-repeat decides what a held key
 means to whatever application is listening.
 
 The debug window draws a crosshair on that exact pixel — red when the trigger is on, white
-when it is off — so the rule is visible without probing the wire.
+when it is off — so the rule is visible without probing the wire. That is
+[`mac-app/macvision/display.py`](../mac-app/macvision/display.py), and it is handed the same
+`hit` the trigger used, never a recomputed one.
 
 ## Wire protocol (Mac → ESP32)
 
@@ -42,6 +47,11 @@ sends. Without a timer independent of the frame stream, the key would release it
 moment the PC's screen stopped moving.
 
 ### Watchdog
+
+The 250ms rule is now enforced by *both* possible far ends: the ESP32's firmware on the
+direct link, and `TriggerWatchdog` in [`pi-agent/piproxy/sinks.py`](../pi-agent/piproxy/sinks.py)
+when the trigger goes to the Raspberry Pi over UDP — which is the usual path now. The Mac's
+own shutdown release is a courtesy, not the guarantee; a crash or a `SIGKILL` skips it.
 
 If the ESP32 hears nothing for **250ms** it drives the GPIO low regardless of the last state
 it was told. That covers the Mac app crashing, being Ctrl-C'd, or the cable being pulled —
@@ -166,6 +176,10 @@ The one place the code does spend care on latency is *ordering*: `trigger.update
 called immediately after inference, before `result.plot()` and `imshow()`, which together
 cost several milliseconds and are pure debug output. The trigger byte leaves the moment the
 decision exists, not at the end of the frame.
+
+That ordering is enforced in [`mac-app/macvision/loop.py`](../mac-app/macvision/loop.py) and
+kept true by [`mac-app/tests/test_loop_order.py`](../mac-app/tests/test_loop_order.py), which
+drives the real loop with fakes and fails if a trigger write ever moves below a draw call.
 
 ## Alternative considered: no ESP32 at all
 

@@ -1,7 +1,7 @@
 """Throwaway local UDP listener for Milestone 2 (loopback bring-up test).
 
 Run this first, then run capture_agent.exe (pointed at 127.0.0.1) in another window. Not
-part of the shipped product - mac-app/receiver.py is the real thing. Kept stdlib-only and
+part of the shipped product - mac-app/macvision/ is the real thing. Kept stdlib-only and
 free of any 3.8+-only syntax so it also runs as-is with this Windows machine's existing
 Python 3.7.
 """
