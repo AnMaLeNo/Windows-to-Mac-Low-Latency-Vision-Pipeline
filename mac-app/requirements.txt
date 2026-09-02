@@ -2,3 +2,9 @@ ultralytics>=8.3
 opencv-python>=4.9
 numpy>=1.26
 pyserial>=3.5
+
+# The CoreML/Neural Engine backend (macvision/detector_coreml.py) and the export that
+# produces its .mlpackage. Not required to run: a .pt still works through torch, and
+# --weights decides which path is taken.
+coremltools>=8.0
+pillow>=10.0

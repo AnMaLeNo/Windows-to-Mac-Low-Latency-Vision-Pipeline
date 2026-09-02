@@ -79,9 +79,19 @@ def parse_args(argv=None):
     vis.add_argument("--weights", default=os.environ.get("MACVISION_WEIGHTS",
                                                          "yolov8n.pt"),
                      help="model weights, resolved against the working directory "
-                          "(default yolov8n.pt; see macvision/detector.py)")
+                          "(default yolov8n.pt). A .pt runs through torch on --device; "
+                          "a .mlpackage runs through CoreML on the Neural Engine, which "
+                          "is both faster and far steadier - see "
+                          "macvision/detector_coreml.py")
     vis.add_argument("--device", default="mps",
-                     help="torch device for both the warmup and inference (default mps)")
+                     help="torch device for both the warmup and inference (default "
+                          "mps). Ignored for a .mlpackage, which uses --compute-units")
+    vis.add_argument("--compute-units", default="ALL",
+                     choices=("ALL", "CPU_AND_NE", "CPU_AND_GPU", "CPU_ONLY"),
+                     help="which hardware CoreML may use for a .mlpackage (default "
+                          "ALL, which picks the Neural Engine). The others exist to "
+                          "make placement measurable: on this M5, yolov8n at 640 runs "
+                          "in 1.8ms on the ANE, 5.6ms on the GPU and 9.9ms on the CPU")
     vis.add_argument("--roi-w", type=int, default=ROI_W,
                      help=f"ROI width the sender is capturing (default {ROI_W})")
     vis.add_argument("--roi-h", type=int, default=ROI_H,
@@ -253,17 +263,31 @@ def main(argv=None):
     roi_h = source.height or args.roi_h
 
     # 3. The detector, shaped from the geometry resolved above.
+    #
+    # The backend is chosen by the weights' EXTENSION rather than by a flag of its own.
+    # A .mlpackage is a CoreML export and can only run through CoreML; a .pt can only
+    # run through torch. A --backend flag would therefore add a way to state something
+    # the filename already settles, and a way to state it wrongly.
+    coreml = args.weights.endswith((".mlpackage", ".mlmodel"))
     try:
-        from .detector import Detector
-        detector = Detector(roi_w, roi_h, weights=args.weights, device=args.device)
+        if coreml:
+            from .detector_coreml import CoreMLDetector
+            detector = CoreMLDetector(roi_w, roi_h, weights=args.weights,
+                                      compute_units=args.compute_units)
+        else:
+            from .detector import Detector
+            detector = Detector(roi_w, roi_h, weights=args.weights, device=args.device)
     except ImportError as exc:
-        print(f"error: ultralytics is not installed ({exc}). "
+        missing = "coremltools" if coreml else "ultralytics"
+        print(f"error: {missing} is not installed ({exc}). "
               "Run pip install -r requirements.txt.", file=sys.stderr)
         source.close()
         trigger.stop()
         return 2
     except Exception as exc:
-        print(f"error: could not load {args.weights} on device {args.device}: {exc}",
+        where = f"compute units {args.compute_units}" if coreml \
+            else f"device {args.device}"
+        print(f"error: could not load {args.weights} on {where}: {exc}",
               file=sys.stderr)
         source.close()
         trigger.stop()

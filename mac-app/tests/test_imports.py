@@ -30,7 +30,8 @@ PURE = ("macvision", "macvision.protocol", "macvision.rule", "macvision.stats",
 # CONSTRUCTING or OPENING them needs the dependency. The two sources count as pure
 # above for the same reason: udp reaches opencv only inside open(), and camera only
 # when it has to build its own VideoCapture.
-ADAPTERS = ("macvision.codec", "macvision.detector", "macvision.display")
+ADAPTERS = ("macvision.codec", "macvision.detector", "macvision.detector_coreml",
+            "macvision.display")
 
 
 def run():
