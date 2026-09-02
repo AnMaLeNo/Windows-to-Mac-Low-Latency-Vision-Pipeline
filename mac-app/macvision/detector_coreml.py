@@ -58,7 +58,11 @@ class CoreMLDetector:
 
         self._ct, self._cv2, self._np = ct, cv2, np
         self.weights = weights
-        self.classes = set(classes)
+        self.classes = list(classes)
+        # Precomputed for the hot path. boxes_xyxy() calls np.isin once per frame, and
+        # rebuilding the lookup from a set each time would allocate on every frame for
+        # a value that never changes.
+        self._class_array = np.asarray(self.classes)
         self.conf = conf
         self.iou = iou
         self.roi = (roi_w, roi_h)
@@ -94,6 +98,25 @@ class CoreMLDetector:
         # rewritten below - np.full() per frame would allocate 1.2MB on the hot path.
         self._canvas = None if self._square else \
             np.full((sh, sw, 3), PAD_VALUE, dtype=np.uint8)
+
+        # The export embeds Ultralytics' class names in the model metadata, so the names
+        # come from the MODEL rather than from a COCO list hardcoded here - a hardcoded
+        # list would be silently wrong the day someone points --weights at a model
+        # trained on their own classes, which is the whole reason detector.py asks
+        # model.names instead of assuming.
+        import ast
+        raw = self.model.user_defined_metadata.get("names", "")
+        try:
+            self.names = ast.literal_eval(raw) if raw else {}
+        except (ValueError, SyntaxError):
+            self.names = {}
+        if self.names:
+            unknown = [c for c in self.classes if c not in self.names]
+            if unknown:
+                raise ValueError(
+                    f"class {unknown} does not exist in {weights}, which has "
+                    f"{len(self.names)} classes (0-{len(self.names) - 1}). "
+                    f"Nothing would ever match and the trigger could never fire.")
 
         # Warm up for the same reason detector.py does: the first predict() loads the
         # model onto the Neural Engine, which takes ~0.4s. That cost belongs at startup,
@@ -137,10 +160,14 @@ class CoreMLDetector:
         """Thin delegate, mirroring Detector.boxes so loop.py needs no branch."""
         return result.boxes_xyxy()
 
+    def describe_classes(self):
+        """Same contract as Detector.describe_classes - what this will fire on, in words."""
+        return ", ".join(str(self.names.get(c, c)) for c in self.classes)
+
     def status(self):
         return {"weights": self.weights, "device": f"coreml:{self.compute_units}",
-                "classes": sorted(self.classes), "roi": list(self.roi),
-                "input": list(self.size)}
+                "classes": self.classes, "class_names": self.describe_classes(),
+                "roi": list(self.roi), "input": list(self.size)}
 
 
 class CoreMLResult:
@@ -177,7 +204,7 @@ class CoreMLResult:
             self._boxes = []                            # the common case
             return self._boxes
 
-        keep = np.isin(confs.argmax(1), list(self._d.classes))
+        keep = np.isin(confs.argmax(1), self._d._class_array)
         coords = coords[keep]
         if coords.shape[0] == 0:
             self._boxes = []
@@ -207,7 +234,7 @@ class CoreMLResult:
         if confs.shape[0] == 0:
             return [], []
         cls = confs.argmax(1)
-        keep = np.isin(cls, list(self._d.classes))
+        keep = np.isin(cls, self._d._class_array)
         return cls[keep].tolist(), confs[keep].max(1).tolist()
 
     def plot(self):

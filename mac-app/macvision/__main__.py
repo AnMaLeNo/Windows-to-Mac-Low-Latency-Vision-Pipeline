@@ -92,6 +92,21 @@ def parse_args(argv=None):
                           "ALL, which picks the Neural Engine). The others exist to "
                           "make placement measurable: on this M5, yolov8n at 640 runs "
                           "in 1.8ms on the ANE, 5.6ms on the GPU and 9.9ms on the CPU")
+    vis.add_argument(
+        "--classes",
+        # None, not "2", so the DEFAULT lives in exactly one place per backend -
+        # detector.CLASSES and detector_coreml.CLASSES, each documented where the
+        # filtering happens. Spelling "2" here too would make a third copy, and the
+        # copy the --help text advertises is the one that would drift.
+        default=os.environ.get("MACVISION_CLASSES"),
+        help="which COCO class indices count as a detection, comma separated "
+             "(default 2, car). 0=person, 2=car, 5=bus, 7=truck. Defaults to "
+             "$MACVISION_CLASSES. rule.center_is_covered fires on anything listed "
+             "here, which is the point but is also how you hold a key down for a "
+             "passing pedestrian. Where the filter runs differs by backend - inside "
+             "NMS for a .pt, after it for a .mlpackage - which is equivalent only "
+             "because the export sets perClassSuppression. No re-export is needed "
+             "either way: a .mlpackage already carries all 80 classes")
     vis.add_argument("--roi-w", type=int, default=ROI_W,
                      help=f"ROI width the sender is capturing (default {ROI_W})")
     vis.add_argument("--roi-h", type=int, default=ROI_H,
@@ -154,7 +169,45 @@ def parse_args(argv=None):
                 f"It is a period, not a rate: 0 would spin instead of pausing.")
     if not 0 <= args.udp_port <= 65535:
         p.error(f"--udp-port must be between 0 and 65535 (got {args.udp_port})")
+    if args.classes is not None:
+        # Only the SYNTAX is checked here. Whether an index exists is a question about
+        # the loaded model, so it is asked in the detector, where the class count is
+        # actually known - see Detector.__init__. Both halves matter: a typo that
+        # parses but names no class filters everything away, the trigger then never
+        # fires, and nothing looks broken.
+        try:
+            args.classes = parse_classes(args.classes)
+        except ValueError as exc:
+            p.error(f"--classes {args.classes!r}: {exc}")
     return args
+
+
+def parse_classes(text):
+    """"2" or "2,5,7" or "2, 5 ,7" -> [2, 5, 7]. Raises ValueError, never returns [].
+
+    An empty result is refused rather than passed on. classes=[] reaches Ultralytics as
+    "keep nothing", the rule then never sees a box, and the trigger silently never fires
+    - a failure with no error message anywhere, which is the one outcome this whole
+    argument-checking block exists to prevent.
+    """
+    out = []
+    for piece in text.split(","):
+        piece = piece.strip()
+        if not piece:
+            continue
+        try:
+            value = int(piece)
+        except ValueError:
+            raise ValueError(f"{piece!r} is not an integer. Give COCO class INDICES, "
+                             f"not names - 2 rather than 'car'")
+        if value < 0:
+            raise ValueError(f"{value} is negative; class indices start at 0")
+        if value not in out:
+            out.append(value)
+    if not out:
+        raise ValueError("no class indices given; that would filter every detection "
+                         "away and the trigger could never fire")
+    return out
 
 
 def _raise_interrupt(*_):
@@ -270,13 +323,17 @@ def main(argv=None):
     # the filename already settles, and a way to state it wrongly.
     coreml = args.weights.endswith((".mlpackage", ".mlmodel"))
     try:
+        # Passed only when asked for, so an unset --classes leaves each backend on its
+        # own documented default instead of this file restating it.
+        extra = {} if args.classes is None else {"classes": args.classes}
         if coreml:
             from .detector_coreml import CoreMLDetector
             detector = CoreMLDetector(roi_w, roi_h, weights=args.weights,
-                                      compute_units=args.compute_units)
+                                      compute_units=args.compute_units, **extra)
         else:
             from .detector import Detector
-            detector = Detector(roi_w, roi_h, weights=args.weights, device=args.device)
+            detector = Detector(roi_w, roi_h, weights=args.weights, device=args.device,
+                                **extra)
     except ImportError as exc:
         missing = "coremltools" if coreml else "ultralytics"
         print(f"error: {missing} is not installed ({exc}). "
@@ -304,7 +361,11 @@ def main(argv=None):
 
     stats = LatencyStats(window=args.stats_window)
 
+    # The class names, not the indices. "[2, 5, 7]" is not something anyone can check
+    # at a glance against what they meant to type, and a --classes typo that names the
+    # wrong-but-existing class is otherwise invisible until the key fails to press.
     print(f"[macvision] source {source.description}, roi {roi_w}x{roi_h}, "
+          f"firing on {detector.describe_classes()}, "
           f"trigger {trigger.status()['description']}"
           + ("" if display is not None else ", display off"), flush=True)
 

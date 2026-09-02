@@ -28,9 +28,23 @@ class Detector:
 
         self.weights = weights
         self.device = device
-        self.classes = classes
+        self.classes = list(classes)
         self.roi = (roi_w, roi_h)
         self.model = YOLO(weights)
+
+        # Asked of the MODEL, because only the model knows how many classes it has -
+        # __main__ can check that "--classes 99" parses, not that 99 names anything.
+        # It has to raise: predict(classes=[99]) on an 80-class model is not an error,
+        # it simply matches nothing, so the rule never sees a box and the trigger never
+        # fires. That is a silent total failure, and the whole point of validating here
+        # is that it happens before the trigger link starts sending.
+        self.names = getattr(self.model, "names", None) or {}
+        unknown = [c for c in self.classes if c not in self.names]
+        if unknown:
+            raise ValueError(
+                f"class {unknown} does not exist in {weights}, which has "
+                f"{len(self.names)} classes (0-{len(self.names) - 1}). "
+                f"Nothing would ever match and the trigger could never fire.")
         # Warm up before the receive loop starts: Ultralytics' AutoBackend already runs an
         # internal dummy forward pass on first call for non-CPU devices, which absorbs the
         # MPS/Metal kernel-compile cost. Running it here means that cost lands at startup
@@ -67,9 +81,18 @@ class Detector:
         """
         return boxes_xyxy(result)
 
+    def describe_classes(self):
+        """"car" or "car, bus, truck" - what this detector will fire on, in words.
+
+        The startup line prints indices otherwise, and "[2, 5, 7]" is not something
+        anyone can check at a glance against what they meant to type.
+        """
+        return ", ".join(str(self.names.get(c, c)) for c in self.classes)
+
     def status(self):
         return {"weights": self.weights, "device": self.device,
-                "classes": self.classes, "roi": list(self.roi)}
+                "classes": self.classes, "class_names": self.describe_classes(),
+                "roi": list(self.roi)}
 
 
 def boxes_xyxy(result):
