@@ -10,6 +10,11 @@ Two independent sources write into it: the physical keyboard read from evdev, an
 the vision trigger pushed in over the network. They are merged rather than
 interleaved, because both are *level* signals - "this key is currently held" - not
 events. A key is down in the emitted report if either source holds it.
+
+The trigger source passes through one gate first. While the agent is *disarmed* the
+Mac's state is still received, still watched by the watchdog and still visible in
+/status - it simply does not reach the report. Arming is a local decision (a key on
+the real keyboard, or the HTTP API), never something the Mac can do to itself.
 """
 
 import threading
@@ -33,11 +38,16 @@ class KeyState:
     contention is measured in microseconds and never shows up as input latency.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, armed: bool = False) -> None:
         self._lock = threading.Lock()
         self._physical: Set[int] = set()   # HID usages held on the real keyboard
         self._modifiers = 0                # bitmask from the real keyboard
-        self._trigger: Set[int] = set()    # HID usages held by the vision trigger
+        self._trigger: Set[int] = set()    # HID usages that actually reach the report
+        # What the Mac last asked for, kept separately from what we emit. Disarming
+        # must not lose the request: re-arming while a car is still on the ROI has to
+        # press the key immediately, not wait for the Mac's next frame.
+        self._requested: Set[int] = set()
+        self._armed = bool(armed)
         # Insertion order matters when more than six keys are down: without it,
         # iterating a set would evict an arbitrary key on every report, making the
         # emitted stream flicker between different subsets of the same held keys.
@@ -88,18 +98,62 @@ class KeyState:
     def set_trigger(self, usages: Iterable[int]) -> None:
         """Replace the trigger's held keys. Idempotent by design: the Mac sends the
         current state on every frame and on a keepalive, never deltas, so applying
-        the same state twice must be a no-op (see docs/TRIGGER.md)."""
-        new = set(usages)
+        the same state twice must be a no-op (see docs/TRIGGER.md).
+
+        Records the request unconditionally; whether it reaches the report is the
+        gate's business."""
         with self._lock:
-            if new == self._trigger:
-                return
-            for usage in new - self._trigger:
-                if usage not in self._physical:
-                    self._order.append(usage)
-            for usage in self._trigger - new:
-                if usage not in self._physical and usage in self._order:
-                    self._order.remove(usage)
-            self._trigger = new
+            self._requested = set(usages)
+            self._emit_trigger_locked()
+
+    def _emit_trigger_locked(self) -> None:
+        """Push the requested set through the gate and reconcile _order with it.
+
+        One choke point for both ways the emitted set can change - a new state from
+        the Mac, or the gate opening and closing under an unchanged one - so the
+        ordering bookkeeping cannot drift between them.
+        """
+        new = set(self._requested) if self._armed else set()
+        if new == self._trigger:
+            return
+        for usage in new - self._trigger:
+            if usage not in self._physical:
+                self._order.append(usage)
+        for usage in self._trigger - new:
+            if usage not in self._physical and usage in self._order:
+                self._order.remove(usage)
+        self._trigger = new
+
+    # --- the gate ---------------------------------------------------------------
+
+    def set_armed(self, armed: bool) -> bool:
+        """Open or close the gate. Returns the resulting state.
+
+        Disarming takes effect in the very next report, not at the next keepalive:
+        the caller nudges the emitter, and a trigger key that was down comes up in
+        the same report as the keypress that disarmed it.
+        """
+        with self._lock:
+            self._armed = bool(armed)
+            self._emit_trigger_locked()
+            return self._armed
+
+    def toggle_armed(self) -> bool:
+        """Flip the gate. Returns the new state.
+
+        Read-modify-write under one lock acquisition, for the same reason
+        set_modifier_bit is: two toggles racing on a snapshot would cancel out and
+        leave the agent armed when you pressed the key to disarm it.
+        """
+        with self._lock:
+            self._armed = not self._armed
+            self._emit_trigger_locked()
+            return self._armed
+
+    @property
+    def armed(self) -> bool:
+        with self._lock:
+            return self._armed
 
     # --- emission ---------------------------------------------------------------
 
@@ -123,8 +177,13 @@ class KeyState:
         """Human-readable state, for the API's /status endpoint."""
         with self._lock:
             return {
+                "armed": self._armed,
                 "modifiers": self._modifiers,
                 "physical_keys": sorted(self._physical),
+                # What the Mac asked for vs what we emit. The two differ exactly when
+                # the agent is disarmed, which is how a "the Mac is firing but nothing
+                # reaches the PC" report resolves itself at a glance.
+                "trigger_requested": sorted(self._requested),
                 "trigger_keys": sorted(self._trigger),
             }
 

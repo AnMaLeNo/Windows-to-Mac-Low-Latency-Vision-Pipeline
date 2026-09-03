@@ -83,6 +83,11 @@ def main():
 
     start_packets = before["trigger"]["packets"]
     print(f"    piproxy has seen {start_packets} trigger packets so far")
+    # .get, not [...]: this tool has to keep working against a Pi running a piproxy
+    # from before the gate existed, where the field is simply absent.
+    armed = before["state"].get("armed")
+    if armed is not None:
+        print(f"    the Pi is {'ARMED' if armed else 'DISARMED'}")
 
     trigger = open_trigger(args.target)
     try:
@@ -114,6 +119,17 @@ def main():
               "System Settings -> Network -> Firewall")
         return 1
     if not mid["state"]["trigger_keys"]:
+        # Disarmed is not a fault, and it is the one cause of this failure that the
+        # status already spells out - so name it instead of sending the user off to
+        # check a --trigger-key that is perfectly correct.
+        if mid["state"].get("armed") is False:
+            print("\nFAIL: packets arrived and the Pi registered them "
+                  f"(it wants {mid['state'].get('trigger_requested')}), but it is "
+                  f"DISARMED, so nothing reaches the PC.")
+            print("  press the arm key on the keyboard the Pi is forwarding, or:")
+            print(f"    curl -XPOST http://{host}:{args.http_port}/armed "
+                  f"-d '{{\"armed\":true}}'")
+            return 1
         print("\nFAIL: packets arrived, but the Pi held no key while the trigger was on.")
         print("  1. check piproxy's --trigger-key argument")
         print("  2. read the Pi's log: journalctl -u piproxy -n 50")

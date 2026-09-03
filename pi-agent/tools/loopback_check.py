@@ -53,9 +53,12 @@ def main():
         return 1
 
     proc = subprocess.Popen(
+        # --start-armed because this test drives the trigger and nothing else: with
+        # no keyboard attached there is no arm key to press, and the point here is
+        # the wire, not the gate.
         [sys.executable, "-m", "piproxy", "--sink", "serial",
          "--serial-port", port, "--no-keyboard", "--no-http",
-         "--trigger-key", "k"],
+         "--trigger-key", "k", "--start-armed"],
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
     )
     try:

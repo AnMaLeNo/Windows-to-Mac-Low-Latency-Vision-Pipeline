@@ -53,6 +53,13 @@ def parse_args(argv=None):
                      help="key held while a car covers the ROI centre (default k). "
                           "f13-f15 exist on no real keyboard, so they can never "
                           "collide with something you actually press")
+    trg.add_argument("--arm-key", default="a",
+                     help="key on the real keyboard that arms/disarms the trigger "
+                          "(default a). It is still forwarded to the PC. Set it to a "
+                          "key no keyboard has (f13) to disable the toggle")
+    trg.add_argument("--start-armed", action="store_true",
+                     help="come up armed. Default is disarmed: a service restarted by "
+                          "systemd mid-session must not start pressing keys on its own")
     trg.add_argument("--udp-port", type=int, default=TRIGGER_PORT)
     trg.add_argument("--http-port", type=int, default=HTTP_PORT)
     trg.add_argument("--no-http", action="store_true", help="disable the HTTP API")
@@ -85,8 +92,16 @@ def main(argv=None) -> int:
 
     try:
         trigger_usage = resolve_trigger_key(args.trigger_key)
+        arm_usage = resolve_trigger_key(args.arm_key)
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+    if arm_usage == trigger_usage:
+        # One key cannot both be the trigger and the switch that gates it: every
+        # disarm would be followed by the trigger pressing that same key again.
+        print(f"error: --arm-key and --trigger-key are both {args.arm_key!r}",
+              file=sys.stderr)
         return 2
 
     try:
@@ -101,7 +116,7 @@ def main(argv=None) -> int:
         print(f"error: could not open the {args.sink} sink: {exc}", file=sys.stderr)
         return 2
 
-    state = KeyState()
+    state = KeyState(armed=args.start_armed)
     emitter = Emitter(state, sink, keepalive_s=args.keepalive_ms / 1000.0)
     watchdog = TriggerWatchdog(state, emitter, timeout_s=args.watchdog_ms / 1000.0)
 
@@ -110,7 +125,8 @@ def main(argv=None) -> int:
         try:
             from .keyboard import KeyboardReader
             keyboard = KeyboardReader(state, emitter, device_paths=args.devices,
-                                      grab=not args.no_grab)
+                                      grab=not args.no_grab,
+                                      arm_usage=arm_usage, arm_key=args.arm_key)
         except ImportError:
             print("error: python3-evdev is not installed. Run pi-agent/setup.sh, "
                   "or pass --no-keyboard to run trigger-only.", file=sys.stderr)
@@ -149,6 +165,10 @@ def main(argv=None) -> int:
 
     print(f"[piproxy] sink={sink.name} trigger_key={args.trigger_key!r} "
           f"(usage 0x{trigger_usage:02x})", flush=True)
+    print(f"[piproxy] trigger {'ARMED' if state.armed else 'DISARMED'}; "
+          + (f"press {args.arm_key!r} to toggle" if keyboard else
+             f"no keyboard, use: curl -XPOST http://<pi>:{args.http_port}/armed "
+             f"-d '{{\"toggle\":true}}'"), flush=True)
     print(f"[piproxy] trigger UDP on :{args.udp_port}"
           + (f", HTTP API on :{args.http_port}" if http else ""), flush=True)
     if keyboard and args.no_grab:

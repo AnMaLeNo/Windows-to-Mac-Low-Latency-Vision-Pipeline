@@ -362,7 +362,12 @@ class TriggerWatchdog:
             if self.last_seen == 0.0:
                 continue  # the Mac has never connected; nothing to time out yet
             if time.monotonic() - self.last_seen > self.timeout_s:
-                if self.state.snapshot()["trigger_keys"]:
+                snap = self.state.snapshot()
+                # Both sets, not just the emitted one. While disarmed nothing reaches
+                # the report, but the Mac's last request is still on file - and if it
+                # were left there, arming later would press the key on behalf of a
+                # vision app that died minutes ago.
+                if snap["trigger_keys"] or snap["trigger_requested"]:
                     self.fired += 1
                     print("[watchdog] no trigger update; releasing trigger keys",
                           file=sys.stderr, flush=True)

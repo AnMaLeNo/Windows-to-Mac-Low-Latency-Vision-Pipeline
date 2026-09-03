@@ -31,6 +31,22 @@ when it is off — so the rule is visible without probing the wire. That is
 [`mac-app/macvision/display.py`](../mac-app/macvision/display.py), and it is handed the same
 `hit` the trigger used, never a recomputed one.
 
+## The gate on the Pi
+
+The rule above is the Mac's whole contribution: it decides, and it says so 50 times a
+second. It does not decide whether anything is *typed*. On the Pi path that stays a local
+choice — the agent is either armed or disarmed, and a disarmed agent receives the trigger,
+counts it, shows it in `/status`, and drops it before the report.
+
+The switch is a key on the keyboard the Pi is already forwarding (`A` by default, the Pi
+sees it first because it holds the device exclusively), or `POST /armed` on the HTTP API.
+It comes up disarmed. Details, including why the request is kept while the gate is shut,
+are in [`pi-agent/README.md`](../pi-agent/README.md#arming-the-trigger-key-only-goes-out-when-you-say-so).
+
+This is the one asymmetry between the two far ends: on the direct ESP32 link, a byte on the
+wire *is* a keypress. The Pi has a keyboard in its hands, so it can afford a safety catch
+that the microcontroller cannot.
+
 ## Wire protocol (Mac → ESP32)
 
 One byte, no framing: `0x01` = active, `0x00` = idle. 115200 baud.
