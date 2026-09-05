@@ -70,8 +70,30 @@ detector a frame of the wrong shape.
 The same values are accepted as `--trigger-target`, which wins over the environment.
 The env var is what the READMEs and the muscle memory use; the flag is an extra door.
 `python3 -m macvision --help` lists everything else (`--no-display`, `--weights`,
-`--roi-w/--roi-h`, `--udp-port`, `--list-ports`, …) and works on a machine with neither
-opencv nor ultralytics installed.
+`--roi-w/--roi-h`, `--udp-port`, `--list-ports`, `--telemetry`, `--describe-args`, …)
+and works on a machine with neither opencv nor ultralytics installed.
+
+### Dashboard
+
+```bash
+source venv/bin/activate
+python3 -m dashboard            # then open http://127.0.0.1:50511
+```
+
+A web page, on this Mac, for this Mac: it starts and stops `macvision`, and shows the
+debug image, the latency numbers and the trigger state as they happen. It can only do
+what the command line can, because it *is* the command line — the launch form is built
+from `python3 -m macvision --describe-args`, and the argv is shown before anything runs.
+Start it from a real terminal: macOS grants the camera to the app that owns the process,
+and the `macvision` it spawns inherits the terminal's grant. The venv is for that
+`macvision`, not for the page.
+
+`macvision` gains two things for it and nothing else: `--describe-args`, above, and
+`--telemetry tcp://[host][:port]` (or `$MACVISION_TELEMETRY`), off by default — unset,
+nothing runs for it. The dashboard sets it when it launches.
+[`tools/telemetry_tap.py`](tools/telemetry_tap.py) reads the same stream with no browser,
+and is how to check what the tap costs. The three contracts — the stream, the argument
+description, what the browser receives — are in [`docs/DASHBOARD.md`](../docs/DASHBOARD.md).
 
 ### Finding the camera index
 
@@ -139,8 +161,10 @@ automatically (stock COCO weights, just to validate the pipeline end to end — 
 | [`macvision/trigger.py`](macvision/trigger.py) | 3 | the one-byte level link, its transports and the keepalive | pyserial (serial only) |
 | [`macvision/stats.py`](macvision/stats.py) | — | the self-calibrating latency window and the overlay vocabulary | — |
 | [`macvision/display.py`](macvision/display.py) | — | the debug window | opencv (HighGUI) |
+| [`macvision/telemetry.py`](macvision/telemetry.py) | — | the telemetry tap: contract 1 of [`docs/DASHBOARD.md`](../docs/DASHBOARD.md), the one output the dashboard reads | — |
 | [`macvision/loop.py`](macvision/loop.py) | — | the frame loop — the ordering *is* the design | — |
 | [`macvision/__main__.py`](macvision/__main__.py) | — | argparse, and the startup order | — |
+| [`dashboard/`](dashboard/) | — | a separate process: launches `macvision`, reads the tap, serves the page — [`docs/DASHBOARD.md`](../docs/DASHBOARD.md) | a browser; opencv only to encode JPEG faster, else stdlib PNG |
 
 Blocks 2a and 2b are split because they answer different questions. `detector.py` turns
 pixels into boxes and is the only module that may import ultralytics; `rule.py` turns
@@ -164,6 +188,8 @@ python3 -m tests.test_sources       # both sources: newest-wins, drops, cropping
 python3 -m tests.test_trigger       # TRIGGER_TARGET parsing, and the release-last race
 python3 -m tests.test_imports       # the core stays dependency-free
 python3 -m tests.test_loop_order    # trigger.update() fires before any drawing
+python3 -m tests.test_telemetry     # the tap: framing, newest-wins, the hot path copies nothing without a subscriber
+python3 -m tests.test_dashboard     # argv building, the bus, the reader, the runner, the routes
 ```
 
 ## Tools
@@ -171,12 +197,16 @@ python3 -m tests.test_loop_order    # trigger.update() fires before any drawing
 ```bash
 TRIGGER_TARGET=udp://raspberrypi.local:48010 python3 -m tools.trigger_check
 python3 -m tools.frame_replay capture.bin --box 100,100,200,200
+python3 -m tools.telemetry_tap
 ```
 
 `trigger_check` drives the real trigger module at the real 50Hz and reads the Pi's own
 packet counter over HTTP, so it answers "did the byte arrive?" from the far end — with
 no Windows PC and no MPS in the picture. `frame_replay` parses one captured datagram and
-asks the rule about it, with no detector at all.
+asks the rule about it, with no detector at all. `telemetry_tap` is the reference
+subscriber for the `--telemetry` stream, and the way to check that the tap costs nothing:
+run `macvision` with and without `--telemetry` (tap connected) and compare `decide med`
+in the `[stats]` line.
 
 ## Trigger hardware
 

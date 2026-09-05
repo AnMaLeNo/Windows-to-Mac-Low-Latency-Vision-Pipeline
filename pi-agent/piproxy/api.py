@@ -10,6 +10,11 @@ second: there is nothing to retransmit, because a newer state is always 20ms awa
 HTTP (control and inspection). Same trigger reachable with curl, plus /status and
 manual key presses for testing. Convenient, but it is a request/response round trip
 on a fresh connection - fine at human rates, not for the 50Hz stream.
+
+/armed is the second way to work the trigger gate, next to the arm key on the real
+keyboard. It exists because --no-keyboard and a dead receiver both leave you with no
+key to press, and an agent that can only be armed from a keyboard it cannot see is
+one unplugged dongle away from being unusable.
 """
 
 import json
@@ -139,7 +144,8 @@ def make_http_handler(ctx):
                 return self._reply(200, {"candidates": list_keyboards()})
             return self._reply(404, {"error": "not found",
                                      "routes": ["/health", "/status", "/keyboards",
-                                                "POST /trigger", "POST /key"]})
+                                                "POST /trigger", "POST /key",
+                                                "POST /armed"]})
 
         def do_POST(self):
             body = self._body()
@@ -148,6 +154,16 @@ def make_http_handler(ctx):
                     return self._reply(400, {"error": "expected {\"active\": true|false}"})
                 ctx.trigger.apply(bool(body["active"]))
                 return self._reply(200, {"active": bool(body["active"])})
+
+            if self.path == "/armed":
+                if "armed" in body:
+                    armed = ctx.set_armed(bool(body["armed"]), source="http")
+                elif body.get("toggle"):
+                    armed = ctx.toggle_armed(source="http")
+                else:
+                    return self._reply(400, {"error": "expected {\"armed\": true|false} "
+                                                      "or {\"toggle\": true}"})
+                return self._reply(200, {"armed": armed})
 
             if self.path == "/key":
                 name, action = body.get("key"), body.get("action", "press")
@@ -167,7 +183,9 @@ def make_http_handler(ctx):
                 ctx.emitter.nudge()
                 return self._reply(200, {"key": name, "action": action, "usage": usage})
 
-            return self._reply(404, {"error": "not found"})
+            return self._reply(404, {"error": "not found",
+                                     "routes": ["POST /trigger", "POST /key",
+                                                "POST /armed"]})
 
     return Handler
 
@@ -199,6 +217,23 @@ class AgentContext:
         self.keyboard = keyboard
         self.trigger = trigger
         self.sink = sink
+
+    def set_armed(self, armed: bool, source: str = "api") -> bool:
+        return self._announce(self.state.set_armed(armed), source)
+
+    def toggle_armed(self, source: str = "api") -> bool:
+        return self._announce(self.state.toggle_armed(), source)
+
+    def _announce(self, armed: bool, source: str) -> bool:
+        """Log the new gate state and get it onto the wire immediately.
+
+        The nudge is the point: without it a disarm would sit in KeyState until the
+        next 20ms keepalive, which is a trigger key still held on the PC after you
+        asked for it to stop.
+        """
+        print(f"[arm] {source}: trigger {'ARMED' if armed else 'DISARMED'}", flush=True)
+        self.emitter.nudge()
+        return armed
 
     def status(self) -> dict:
         last = self.emitter.last_report

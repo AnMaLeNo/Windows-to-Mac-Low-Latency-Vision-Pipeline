@@ -17,6 +17,14 @@ There is deliberately no context object, no Frame copy and no stage list:
   - A stage list runs in declaration order, and someone will eventually put render
     before trigger. The decision and the send must be reachable with no renderer in
     existence at all - which is exactly what run(display=None) gives.
+
+The telemetry tap (docs/DASHBOARD.md) is the one collaborator added since, and it is
+placed by the same rule. Its frame() is the only copy of the pixels this loop ever
+makes, and it sits after the trigger byte, after decide_ms AND after the mac_ms sample,
+so the copy is measured by nothing - and before present(), so the frame a subscriber
+sees is the frame that was decided on, not the one after. None by default, and then
+not one instruction runs for it; tests/test_loop_order.py asserts both the position and
+the fact that neither timing includes it.
 """
 
 import sys
@@ -27,7 +35,7 @@ from .stats import STATS_EVERY, overlay_text
 
 
 def run(source, detector, action, stats, display, roi_w, roi_h,
-        stats_every=STATS_EVERY):
+        stats_every=STATS_EVERY, telemetry=None):
     """The frame loop. Returns 0 on a clean quit (q, Ctrl-C, SIGTERM).
 
     Tears NOTHING down - main() owns that, in a finally block, so the key is released on
@@ -86,8 +94,11 @@ def run(source, detector, action, stats, display, roi_w, roi_h,
             # several milliseconds, and none of that work is needed to decide whether to
             # press the key - so the trigger byte goes out the instant the decision
             # exists, not at end of frame. `hit` is computed once here and reused by the
-            # crosshair and the overlay below.
-            hit = center_is_covered(detector.boxes(result), cx, cy)
+            # crosshair and the overlay below. So is `boxes`: detector.boxes() is the
+            # device-to-host sync on the torch path, and the telemetry tap below reuses
+            # this list rather than asking for it a second time.
+            boxes = detector.boxes(result)
+            hit = center_is_covered(boxes, cx, cy)
             action.update(hit)
 
             # Acquisition -> byte written. The number that actually matters for latency,
@@ -119,6 +130,16 @@ def run(source, detector, action, stats, display, roi_w, roi_h,
             # watch.
             frames += 1
 
+            if telemetry is not None:
+                # The tap's one call, and this is the one place for it: after the
+                # trigger byte, after decide_ms and mac_ms have both been sampled - so
+                # the pixel copy it makes is measured by nothing - and before
+                # present(), so what a subscriber sees is the frame that was decided
+                # on. It copies once when someone is listening and returns at once
+                # when nobody is; everything else happens on the publisher's thread.
+                telemetry.frame(cap, boxes, hit, cx, cy, frames, e2e_ms, queue_ms,
+                                mac_ms, decide_ms, source.upstream_label)
+
             if frames % stats_every == 0:
                 # The median and the flushing write sit past the trigger byte, which
                 # is where they belong; a "measure, then act" reorganisation would move
@@ -126,10 +147,21 @@ def run(source, detector, action, stats, display, roi_w, roi_h,
                 # min() scan is NOT periodic - it runs on every frame inside
                 # stats.observe() above, because the calibration needs it every time.
                 # It is still past the trigger byte, which is the property that matters.
-                print(f"[stats] {stats.summary()}  |  "
-                      f"stale dropped={getattr(source, 'stale_dropped', 0)}  |  "
-                      f"trigger writes dropped={action.dropped_writes}"
-                      + ("  |  display=off" if display is None else ""), flush=True)
+                # One snapshot, rendered twice: the printed line and the telemetry
+                # message carry the same numbers, so the medians are computed once
+                # here rather than once per consumer.
+                snapshot = stats.status()
+                line = (f"[stats] {stats.summary(snapshot)}  |  "
+                        f"stale dropped={getattr(source, 'stale_dropped', 0)}  |  "
+                        f"trigger writes dropped={action.dropped_writes}"
+                        + ("  |  display=off" if display is None else ""))
+                print(line, flush=True)
+                if telemetry is not None:
+                    # The same cadence, the same line, verbatim - a subscriber sees
+                    # exactly what the terminal saw, plus the numbers behind it.
+                    telemetry.stats(frames, snapshot,
+                                    getattr(source, "stale_dropped", 0),
+                                    action.dropped_writes, line)
 
             if display is not None and not display.present(
                     annotated,

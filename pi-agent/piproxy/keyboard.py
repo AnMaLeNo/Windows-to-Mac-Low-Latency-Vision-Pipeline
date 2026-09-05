@@ -10,6 +10,10 @@ Hot-plug. The receiver can be unplugged, the keyboard sleeps, USB re-enumerates.
 Every one of those looks like a read error on a file descriptor, and the safe
 response is always the same: drop every physical key first (so nothing stays held
 on the PC by a keyboard that is no longer there), then go back to looking for it.
+
+One key is also read for its own sake: the arm key toggles the trigger gate as it
+goes past. It is still forwarded like any other, so the PC keeps receiving it - the
+proxy stays transparent and the toggle is a side effect, not a swallowed keystroke.
 """
 
 import errno
@@ -77,7 +81,8 @@ class KeyboardReader:
     """Grabs one or more keyboards and mirrors their key state into KeyState."""
 
     def __init__(self, state, emitter, device_paths: Optional[List[str]] = None,
-                 name_hints=DEFAULT_NAME_HINTS, grab: bool = True):
+                 name_hints=DEFAULT_NAME_HINTS, grab: bool = True,
+                 arm_usage: Optional[int] = None, arm_key: str = ""):
         from evdev import InputDevice  # lazy: the log-only path needs no evdev
 
         self._InputDevice = InputDevice
@@ -86,6 +91,12 @@ class KeyboardReader:
         self.explicit_paths = device_paths
         self.name_hints = name_hints
         self.grab = grab
+        # Matched as a HID usage rather than an evdev code so the arm key is named
+        # from the same table as the trigger key, and one AZERTY/QWERTY difference
+        # cannot make them disagree about what "a" is.
+        self.arm_usage = arm_usage
+        self.arm_key = arm_key
+        self.arm_toggles = 0
         self.devices: dict = {}          # path -> InputDevice
         self.unmapped_codes: set = set()  # keys with no HID equivalent, reported once
         self.events_seen = 0
@@ -161,10 +172,23 @@ class KeyboardReader:
                       f"(add it to keymap.py if you need it)", file=sys.stderr, flush=True)
             return
 
+        # The gate flips on the press, never on the release: a toggle that also fired
+        # on the way up would land back where it started, and holding the key down
+        # would do nothing at all. (Auto-repeat is already gone, above.)
+        if usage == self.arm_usage and value == VALUE_DOWN:
+            self.arm_toggles += 1
+            armed = self.state.toggle_armed()
+            print(f"[arm] {self.arm_key!r} pressed: trigger "
+                  f"{'ARMED' if armed else 'DISARMED'}", flush=True)
+
+        # Falls through on purpose. The arm key is forwarded to the PC like any
+        # other, so grabbing the keyboard does not cost you the letter.
         if value == VALUE_DOWN:
             self.state.press_physical(usage)
         else:
             self.state.release_physical(usage)
+        # Also what makes a disarm immediate: the report carrying the arm key's own
+        # press is the one that drops the trigger key.
         self.emitter.nudge()
 
     # --- main loop --------------------------------------------------------------
@@ -228,5 +252,7 @@ class KeyboardReader:
             "attached": [{"path": p, "name": d.name} for p, d in self.devices.items()],
             "events_seen": self.events_seen,
             "grabbed": self.grab,
+            "arm_key": self.arm_key or None,
+            "arm_toggles": self.arm_toggles,
             "unmapped_codes": sorted(self.unmapped_codes),
         }

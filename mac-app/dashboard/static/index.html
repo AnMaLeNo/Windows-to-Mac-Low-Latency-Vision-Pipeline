@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>macvision dashboard</title>
+<meta name="theme-color" content="#f4f5f8" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#0f1115">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="icon" href="/icons/icon.svg">
+<link rel="apple-touch-icon" href="/icons/icon-192.png">
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header class="topbar">
+  <h1>macvision</h1>
+  <span id="sse" class="chip" data-state="connecting">sse: connecting</span>
+  <span id="proc" class="chip" data-state="unknown">process: ?</span>
+  <span id="tele" class="chip" data-state="unknown">telemetry: ?</span>
+  <details class="menu">
+    <summary>Panels</summary>
+    <div id="panels-list" class="menu-list"></div>
+  </details>
+</header>
+<main id="panels"></main>
+<script type="module" src="/static/app.js"></script>
+</body>
+</html>

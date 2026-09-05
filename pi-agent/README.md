@@ -177,6 +177,53 @@ curl -s localhost:48011/keyboards
 Fine at human rates. Not for the 50Hz stream — it is a request/response round trip on
 a fresh TCP connection, where the UDP path is one datagram.
 
+### Arming: the trigger key only goes out when you say so
+
+The Mac's decision is a *request*. Whether it reaches the PC is the Pi's decision,
+and it hangs on one boolean:
+
+```
+Mac ──0x01──> [ requested: K ] ──armed?──> [ held: K ] ──> merged report ──> PC
+                                    ▲
+                              press A on the keyboard you are forwarding
+```
+
+**Press `A` to arm, press `A` again to disarm.** The Pi already grabs the keyboard
+exclusively, so it sees the key before anyone else does — no extra hardware, nothing
+running on the PC. `A` is still forwarded to the PC like any other key: the toggle is
+a side effect, not a swallowed keystroke. Use `--arm-key` to move it, and `--arm-key
+f13` to effectively disable the toggle, since no real keyboard has that key.
+
+**It comes up disarmed.** `Restart=always` means systemd can bring this service back
+mid-session, and a proxy that restarts straight into pressing keys is a proxy that
+types into whatever happens to be focused. `--start-armed` opts out.
+
+Three properties worth knowing, because they are what make the gate safe rather than
+merely present:
+
+- **Disarming releases immediately.** A held trigger key comes up in the very same
+  report as the `A` that disarmed it — not at the next 20ms keepalive.
+- **The request survives.** Disarming does not throw away what the Mac said. Arm
+  again while a car is still on the ROI and the key goes down at once, without
+  waiting for the Mac's next frame.
+- **Only the trigger passes through the gate.** Physical keys are untouched: they are
+  forwarded whether you are armed or not, which includes `A` itself.
+
+The gate sits on the state, not on the socket, so it covers `POST /trigger` exactly
+as it covers the UDP hot path. With no keyboard attached — `--no-keyboard`, or a dead
+receiver — the HTTP API is the way in:
+
+```bash
+curl -s -X POST localhost:48011/armed -d '{"toggle":true}'
+curl -s -X POST localhost:48011/armed -d '{"armed":false}'
+curl -s localhost:48011/status | python3 -c 'import json,sys; print(json.load(sys.stdin)["state"])'
+```
+
+`/status` reports both halves — `trigger_requested` is what the Mac asked for,
+`trigger_keys` is what actually reaches the PC. They differ exactly when you are
+disarmed, which answers "the Mac is clearly firing, why is nothing happening" without
+any further digging.
+
 ### Watchdog
 
 If no trigger update arrives for **250ms**, the Pi releases the trigger's keys
@@ -190,6 +237,9 @@ up (250ms timeout plus the watchdog's check granularity).
 
 Note what it does *not* touch: keys held on the **physical** keyboard. Those are
 released by their own key-up events, or wholesale if the receiver disappears.
+
+It expires the *request* as well as the held key, so a silent Mac cannot leave a
+stale "car present" on file for a later arm to act on.
 
 ## Verified on hardware
 
@@ -304,6 +354,11 @@ a receiver typically exposes several `/dev/hidraw*` nodes carrying HID++ rather 
 clean boot-keyboard reports. That is why this reads evdev and translates, instead of
 passing raw HID reports through. `--list` shows what is actually there.
 
+**The arm key is a real key too.** `A` toggles the gate *and* reaches the PC. If the
+PC-side application uses `A` for something you press often, move the toggle with
+`--arm-key` — otherwise ordinary typing will arm and disarm the trigger behind your
+back. `--arm-key` and `--trigger-key` are refused if they are the same key.
+
 **Six keys is the boot-protocol limit.** If more are held, the trigger key takes a
 slot — it is the one key in this system that must never be lost. A trigger key of
 `f13`–`f15` cannot collide with anything you physically press, since no real keyboard
@@ -316,6 +371,7 @@ python3 -m piproxy --list                        # what keyboards can I see?
 python3 -m piproxy --sink log                    # full pipeline, no hardware
 python3 -m piproxy --sink log --no-keyboard      # trigger only
 python3 -m piproxy --sink log --echo-repeats     # log keepalives too
+python3 -m piproxy --sink log --start-armed      # skip the first A press
 python3 -m piproxy --help
 ```
 

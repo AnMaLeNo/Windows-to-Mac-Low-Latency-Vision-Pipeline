@@ -1,8 +1,8 @@
 """Enforces the rule the whole layout rests on: the core imports nothing third-party.
 
-macvision.protocol, .rule, .stats, .sources (both of them), .trigger and .loop
-must import with cv2, numpy, torch and ultralytics absent - that is what lets the
-wire format, the latency arithmetic and the frame ordering be tested on any
+macvision.protocol, .rule, .stats, .sources (both of them), .trigger, .loop and
+.telemetry must import with cv2, numpy, torch and ultralytics absent - that is what
+lets the wire format, the latency arithmetic and the frame ordering be tested on any
 machine, and it is why every other test file in this directory runs here at all.
 
 Nothing but discipline enforces it. One convenience re-export in __init__.py, or one
@@ -23,7 +23,7 @@ HEAVY = ("cv2", "numpy", "torch", "ultralytics", "serial")
 # Must import with nothing installed AND must pull in none of HEAVY.
 PURE = ("macvision", "macvision.protocol", "macvision.rule", "macvision.stats",
         "macvision.sources", "macvision.sources.udp", "macvision.sources.camera",
-        "macvision.trigger", "macvision.loop")
+        "macvision.trigger", "macvision.loop", "macvision.telemetry")
 
 # The adapters. Importing the MODULE must also work with nothing installed, because
 # every third-party import in them sits inside a constructor or a method - only
